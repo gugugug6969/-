@@ -33,11 +33,11 @@ def get_all_stock_names():
     names = {}
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10, verify=False)
+        res = requests.get("[https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL](https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL)", headers=headers, timeout=10, verify=False)
         if res.status_code == 200:
             for item in res.json():
                 if len(item["Code"]) == 4 and item["Code"].isdigit(): names[item["Code"]] = item["Name"]
-        res2 = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, timeout=10, verify=False)
+        res2 = requests.get("[https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes](https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes)", headers=headers, timeout=10, verify=False)
         if res2.status_code == 200:
             for item in res2.json():
                 code = item.get("SecuritiesCompanyCode")
@@ -147,14 +147,14 @@ with st.sidebar:
     
     st.divider()
     st.header("🔔 Discord 戰情推播")
-    webhook = st.text_input("Webhook 網址", type="password", value="https://discordapp.com/api/webhooks/1495088799875731556/Uyj88sZ2CjVjcPX841vNz_LoNmlcs9uX_22QZdXeQTavmOvm0N60Rl9lVFBaoCeFKGDI")
+    webhook = st.text_input("Webhook 網址", type="password", value="[https://discordapp.com/api/webhooks/1495088799875731556/Uyj88sZ2CjVjcPX841vNz_LoNmlcs9uX_22QZdXeQTavmOvm0N60Rl9lVFBaoCeFKGDI](https://discordapp.com/api/webhooks/1495088799875731556/Uyj88sZ2CjVjcPX841vNz_LoNmlcs9uX_22QZdXeQTavmOvm0N60Rl9lVFBaoCeFKGDI)")
     
     if st.button("🛠️ 測試發送 Discord", use_container_width=True):
         if not webhook: st.error("請先輸入網址！")
         else:
             with st.spinner("測試發送中..."):
                 payload = {
-                    "username": "AI 狙擊手", "avatar_url": "https://cdn-icons-png.flaticon.com/512/1154/1154448.png",
+                    "username": "AI 狙擊手", "avatar_url": "[https://cdn-icons-png.flaticon.com/512/1154/1154448.png](https://cdn-icons-png.flaticon.com/512/1154/1154448.png)",
                     "embeds": [{
                         "title": "✅ 系統連線測試成功", "description": "如果你看到這張卡片，代表高級戰情推播系統已上線！", "color": 3066993
                     }]
@@ -194,7 +194,7 @@ if st.button(f"🔥 開始全自動掃描 (尋找高勝率起漲股)", type="pri
     if webhook:
         if not high_win_buys:
             payload = {
-                "username": "AI 狙擊手", "avatar_url": "https://cdn-icons-png.flaticon.com/512/1154/1154448.png",
+                "username": "AI 狙擊手", "avatar_url": "[https://cdn-icons-png.flaticon.com/512/1154/1154448.png](https://cdn-icons-png.flaticon.com/512/1154/1154448.png)",
                 "embeds": [{
                     "title": "📉 今日大盤雷達：無高勝率標的",
                     "description": "市場目前缺乏「爆量 + 勝率 > 60%」的絕佳買點。\nAI 建議：**保護資金，空手觀望。**",
@@ -208,8 +208,68 @@ if st.button(f"🔥 開始全自動掃描 (尋找高勝率起漲股)", type="pri
             top_5_buys = high_win_buys[:5]
             fields = []
             for r in top_5_buys:
-                # 這裡的程式碼格式化字串已被安全處理，不會再被截斷
-                diff_text = f"
-http://googleusercontent.com/immersive_entry_chip/0
+                # 🌟 修復關鍵：使用括號自動連接字串，避免斷行引發 SyntaxError
+                diff_text = (
+                    "```diff\n"
+                    f"+ 現價進場: {r['price']}\n"
+                    f"+ 預估目標: {r['target']}\n"
+                    f"- 跌破停損: {r['stop']}\n"
+                    f"--- 爆量倍數: {r['vol_ratio']}x\n"
+                    "```"
+                )
+                fields.append({
+                    "name": f"💎 {r['code']} {r['name']} ── 勝率: {r['win_rate']}",
+                    "value": diff_text,
+                    "inline": False
+                })
+                
+            payload = {
+                "username": "AI 狙擊手", 
+                "avatar_url": "[https://cdn-icons-png.flaticon.com/512/1154/1154448.png](https://cdn-icons-png.flaticon.com/512/1154/1154448.png)",
+                "embeds": [{
+                    "title": "🚀 【頂級勝率】台股爆量起漲雷達",
+                    "description": f"系統已從全市場嚴選出 **{len(high_win_buys)}** 檔高勝率標的。\n以下為勝率最高的前 5 檔精銳部隊：",
+                    "color": 5763719,
+                    "fields": fields,
+                    "footer": {"text": "台股 AI 專業操盤室自動運算"},
+                    "timestamp": datetime.datetime.now().isoformat()
+                }]
+            }
+            
+            success = send_discord_embed(payload, webhook)
+            if success: st.toast("🔔 高勝率戰情卡片已成功推送到 Discord！")
 
-直接貼上去執行，如果還有任何問題直接跟我說！
+    # ── 📊 網頁結果顯示 ──────────────────────────────────────────
+    if not results:
+        st.info("今日無符合條件之標的。")
+    else:
+        st.subheader(f"✅ 篩選結果 (共 {len(results)} 檔符合)")
+        
+        df_res = pd.DataFrame(results).drop(columns=['df', 'win_rate_val'])
+        df_display = df_res[["code","name","signal","price","vol_ratio","stop","target","rrr","win_rate"]].copy()
+        df_display.columns = ["代號","名稱","訊號","現價","量比","停損","目標","風報比","歷史勝率"]
+
+        def color_signal(val):
+            if val == "BUY":   return "background-color:#1a4a2e; color:#00e5a0; font-weight:bold"
+            if val == "WATCH": return "background-color:#3a3000; color:#ffd166; font-weight:bold"
+            return ""
+
+        st.dataframe(
+            df_display.style.map(color_signal, subset=["訊號"]),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.divider()
+        st.subheader("📊 專業技術分析與歷史回測看板")
+        for r in results:
+            with st.expander(f"{r['code']} {r['name']} | 訊號: {r['signal']} | 量比: {r['vol_ratio']}x | 勝率: {r['win_rate']}", expanded=(r['signal']=="BUY")):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("現價", r['price'])
+                c2.metric("成交量比", f"{r['vol_ratio']} 倍")
+                c3.metric("預估目標價", r['target'])
+                c4.metric("風報比", f"1 : {r['rrr']}" if r['rrr'] else "N/A")
+                st.plotly_chart(plot_chart(r['df'], r['name']), use_container_width=True)
+
+st.divider()
+st.caption("⚠️ 本系統僅供技術分析參考，不構成投資建議。投資有風險，請自行評估後再做決策。")
