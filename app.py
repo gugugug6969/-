@@ -19,20 +19,31 @@ st.caption("自動獲取全台股清單 · 批次運算防封鎖 · BBand + RSI 
 @st.cache_data(ttl=86400)
 def get_all_stock_names():
     names = {}
+    # 🌟 關鍵破解：加上 headers，偽裝成正常的 Google Chrome 瀏覽器
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     try:
         # 抓上市清單
-        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5).json()
-        for item in res:
-            if len(item["Code"]) == 4 and item["Code"].isdigit(): # 只抓正規四碼股票，避開權證
-                names[item["Code"]] = item["Name"]
+        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10)
+        if res.status_code == 200:
+            for item in res.json():
+                if len(item["Code"]) == 4 and item["Code"].isdigit(): 
+                    names[item["Code"]] = item["Name"]
+                    
         # 抓上櫃清單
-        res = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5).json()
-        for item in res:
-            if len(item["SecuritiesCompanyCode"]) == 4 and item["SecuritiesCompanyCode"].isdigit():
-                names[item["SecuritiesCompanyCode"]] = item["CompanyName"]
-    except:
-        # 萬一證交所當機，給幾個保底的預設值
-        names = {"2317": "鴻海", "2330": "台積電", "2454": "聯發科"}
+        res2 = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, timeout=10)
+        if res2.status_code == 200:
+            for item in res2.json():
+                if len(item["SecuritiesCompanyCode"]) == 4 and item["SecuritiesCompanyCode"].isdigit():
+                    names[item["SecuritiesCompanyCode"]] = item["CompanyName"]
+                    
+    except Exception as e:
+        # 🌟 如果還是失敗，直接在網頁上印出真正死掉的原因，不要盲猜
+        st.error(f"⚠️ 抓取股票代號失敗，可能是被擋了。錯誤訊息：{e}")
+        # 保底提供 10 檔權值股測試用
+        names = {"2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2382": "廣達", "2308": "台達電", 
+                 "2881": "富邦金", "2882": "國泰金", "2891": "中信金", "2603": "長榮", "1503": "士電"}
     return names
 
 STOCK_NAMES = get_all_stock_names()
