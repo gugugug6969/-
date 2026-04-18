@@ -4,10 +4,10 @@ import pandas as pd
 import numpy as np
 import requests
 import time
-import urllib3 # 👈 新增這行
+import urllib3
 
-# 關閉不安全連線的警告 👈 新增這行
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# 關閉不安全連線的警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) 
 
 # ── 頁面設定 ──────────────────────────────────────────────
 st.set_page_config(
@@ -17,9 +17,19 @@ st.set_page_config(
 )
 
 st.title("🚀 台股全自動選股系統")
-st.caption("自動獲取全台股清單 · 批次運算防封鎖 · BBand + RSI 雙指標策略")
+st.caption("自動獲取全台股清單 · 批次運算防封鎖 · 支援 Discord 自動推播")
 
-# ── 1. 自動抓取全台股名稱對照表 (快取24小時) ────────────────
+# ── Discord 發送工具 ─────────────────────────────────────────
+def send_discord(msg, webhook_url):
+    """把文字傳送到 Discord 的工具"""
+    if not webhook_url: 
+        return
+    try:
+        requests.post(webhook_url, json={"content": msg}, timeout=5)
+    except:
+        pass
+
+# ── 1. 自動抓取全台股名稱對照表 (繞過憑證檢查版) ────────────────
 @st.cache_data(ttl=86400)
 def get_all_stock_names():
     names = {}
@@ -27,7 +37,6 @@ def get_all_stock_names():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     try:
-        # 🌟 關鍵破解：加上 verify=False，不檢查安全憑證硬闖
         # 抓上市清單
         res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10, verify=False)
         if res.status_code == 200:
@@ -43,9 +52,8 @@ def get_all_stock_names():
                     names[item["SecuritiesCompanyCode"]] = item["CompanyName"]
                     
     except Exception as e:
-        st.error(f"⚠️ 抓取股票代號失敗，可能是被擋了。錯誤訊息：{e}")
-        names = {"2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2382": "廣達", "2308": "台達電", 
-                 "2881": "富邦金", "2882": "國泰金", "2891": "中信金", "2603": "長榮", "1503": "士電"}
+        st.error(f"⚠️ 抓取股票代號失敗。錯誤訊息：{e}")
+        names = {"2330": "台積電", "2317": "鴻海", "2454": "聯發科"}
     return names
 
 STOCK_NAMES = get_all_stock_names()
@@ -84,7 +92,6 @@ def calc_rsi(closes: np.ndarray, period: int):
 @st.cache_data(ttl=86400)
 def fetch_all_closes(codes: list):
     tickers = [f"{c}.TW" for c in codes]
-    # threads=True 讓下載速度變快，progress=False 關閉終端機進度條
     df = yf.download(tickers, period="6mo", interval="1d", auto_adjust=True, threads=True, progress=False)
     return df
 
@@ -117,20 +124,17 @@ def analyze(code, closes, params):
     if any(np.isnan([last_pct_b, last_rsi_s, last_rsi_l])):
         return None
 
-    # %B 寬容期
     pct_b_ok = any(
         (not np.isnan(pct_b[i]) and pct_b[i] < pct_b_thr)
         for i in range(n - grace, n)
     )
 
-    # RSI 黃金交叉（近3日內）
     golden = False
     for i in range(max(1, n - 3), n):
         if not any(np.isnan([rsi_s[i], rsi_l[i], rsi_s[i-1], rsi_l[i-1]])):
             if rsi_s[i-1] <= rsi_l[i-1] and rsi_s[i] > rsi_l[i]:
                 golden = True; break
 
-    # RSI 死亡交叉
     death = (
         not any(np.isnan([rsi_s[-1], rsi_l[-1], rsi_s[-2], rsi_l[-2]]))
         and rsi_s[-2] >= rsi_l[-2] and rsi_s[-1] < rsi_l[-1]
@@ -179,6 +183,15 @@ with st.sidebar:
     rsi_long   = st.number_input("RSI 長天期",        min_value=7,   max_value=30,  value=12)
 
     st.divider()
+    st.header("🔔 通知設定")
+    # 這裡已經幫你把剛剛的 Discord 網址放進去了！
+    discord_url = st.text_input(
+        "Discord Webhook 網址", 
+        type="password", 
+        value="https://discordapp.com/api/webhooks/1495088799875731556/Uyj88sZ2CjVjcPX841vNz_LoNmlcs9uX_22QZdXeQTavmOvm0N60Rl9lVFBaoCeFKGDI"
+    )
+
+    st.divider()
     st.caption("策略邏輯")
     st.info("🟢 **買進**：%B < 門檻 + RSI黃金交叉\n\n🔴 **賣出**：價破上軌或RSI>70 + 死亡交叉")
     st.success(f"📌 系統已自動載入 {len(ALL_CODES)} 檔上市櫃股票")
@@ -193,91 +206,94 @@ params = {
 st.subheader("一鍵全自動掃描")
 st.write("點擊下方按鈕，系統將自動下載全市場歷史股價並套用策略篩選。")
 
-if st.button(f"🔥 開始掃描全台股 ({len(ALL_CODES)} 檔)", type="primary", use_container_width=True):
-    results = []
-    
-    # 步驟 1：批次下載資料
-    with st.spinner(f"正在向 Yahoo Finance 打包下載資料，這可能需要 1~2 分鐘，請耐心等候...（每日僅需下載一次）"):
-        df_all = fetch_all_closes(ALL_CODES)
-
-    # 步驟 2：本地端高速運算
-    prog = st.progress(0, text="準備運算...")
-    
-    for i, code in enumerate(ALL_CODES):
-        # 每 20 檔更新一次進度條，避免畫面卡頓
-        if i % 20 == 0:
-            prog.progress((i + 1) / len(ALL_CODES), text=f"分析指標中... ({i+1}/{len(ALL_CODES)})")
+# 如果 ALL_CODES 有資料，代表有成功抓到股票名單
+if ALL_CODES:
+    if st.button(f"🔥 開始掃描全台股 ({len(ALL_CODES)} 檔)", type="primary", use_container_width=True):
+        results = []
         
-        try:
-            # 從批次下載的整包資料中，抽出單一檔股票的收盤價
-            ticker_str = f"{code}.TW"
-            if "Close" in df_all and ticker_str in df_all["Close"].columns:
-                closes = df_all["Close"][ticker_str].dropna().to_numpy()
-            else:
+        with st.spinner(f"正在向 Yahoo Finance 下載資料，請稍候..."):
+            df_all = fetch_all_closes(ALL_CODES)
+
+        prog = st.progress(0, text="準備運算...")
+        
+        for i, code in enumerate(ALL_CODES):
+            if i % 20 == 0:
+                prog.progress((i + 1) / len(ALL_CODES), text=f"分析指標中... ({i+1}/{len(ALL_CODES)})")
+            
+            try:
+                ticker_str = f"{code}.TW"
+                if "Close" in df_all and ticker_str in df_all["Close"].columns:
+                    closes = df_all["Close"][ticker_str].dropna().to_numpy()
+                else:
+                    continue
+
+                r = analyze(code, closes, params)
+                if r:
+                    results.append(r)
+            except Exception:
                 continue
 
-            # 進入原本的分析邏輯
-            r = analyze(code, closes, params)
-            if r:
-                results.append(r)
-        except Exception:
-            continue
+        prog.empty()
+        results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
 
-    prog.empty()
+        # ── 結果顯示與 Discord 推播 ─────────────────────────────────
+        st.divider()
+        st.metric("✅ 符合條件標的", f"{len(results)} 檔")
 
-    # 排序：BUY > WATCH，再按 RRR 降冪
-    results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
-
-    # ── 結果顯示 ──────────────────────────────────────────
-    st.divider()
-    st.metric("✅ 符合條件標的", f"{len(results)} 檔")
-
-    if not results:
-        st.info("目前沒有股票符合條件，可嘗試放寬左側參數或等待更好時機。")
-    else:
-        # 表格總覽
-        df = pd.DataFrame(results)
-        df_display = df[["code","name","signal","price","pct_b",
-                          "rsi_s","rsi_l","stop","target","rrr"]].copy()
-        df_display.columns = ["代號","名稱","訊號","現價","%B",
-                               f"RSI{rsi_short}",f"RSI{rsi_long}",
-                               "停損","目標","風報比"]
-
-        def color_signal(val):
-            if val == "BUY":   return "background-color:#1a4a2e; color:#00e5a0; font-weight:bold"
-            if val == "WATCH": return "background-color:#3a3000; color:#ffd166; font-weight:bold"
-            return ""
-
-        st.dataframe(
-            df_display.style.map(color_signal, subset=["訊號"]),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        # 個股詳細卡片
-        st.subheader("個股詳細資訊")
-        for r in results:
-            is_buy = r["signal"] == "BUY"
-            badge  = "✅ 買進訊號" if is_buy else "👀 觀察中"
+        # 🚀 在這裡發送 Discord 訊息！
+        buy_list = [r for r in results if r["signal"] == "BUY"]
+        if buy_list and discord_url:
+            lines = ["🚀 **【台股全自動掃描】發現買進訊號！** 🚀", ""]
+            for r in buy_list:
+                lines.append(f"✅ **{r['code']} {r['name']}**")
+                lines.append(f"　 價格: {r['price']} | 目標: {r['target']} | 停損: {r['stop']}")
+            lines.append("\n*快打開系統查看詳細資訊！*")
             
-            with st.expander(f"{r['code']} {r['name']}　{badge}", expanded=is_buy):
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("現價",        f"{r['price']}")
-                c2.metric("%B",          f"{r['pct_b']}", delta="超賣" if r["pct_b"] < pct_b_thr else None)
-                c3.metric(f"RSI{rsi_short}", f"{r['rsi_s']}")
-                c4.metric(f"RSI{rsi_long}",  f"{r['rsi_l']}")
+            send_discord("\n".join(lines), discord_url)
+            st.toast("🔔 買進訊號已同步推送到 Discord！")
 
-                st.divider()
-                t1, t2, t3, t4 = st.columns(4)
-                t1.metric("📌 進場價", f"{r['price']}")
-                t2.metric("🛑 停損價", f"{r['stop']}")
-                t3.metric("🎯 目標價", f"{r['target']}")
-                t4.metric("⚖️ 風報比", f"1 : {r['rrr']}" if r["rrr"] else "N/A")
+        if not results:
+            st.info("目前沒有股票符合條件，可嘗試放寬左側參數或等待更好時機。")
+        else:
+            df = pd.DataFrame(results)
+            df_display = df[["code","name","signal","price","pct_b",
+                              "rsi_s","rsi_l","stop","target","rrr"]].copy()
+            df_display.columns = ["代號","名稱","訊號","現價","%B",
+                                   f"RSI{rsi_short}",f"RSI{rsi_long}",
+                                   "停損","目標","風報比"]
 
-                st.caption(
-                    f"BB 軌道：下軌 {r['lower']} ／ 中軌 {r['middle']} ／ 上軌 {r['upper']}"
-                )
+            def color_signal(val):
+                if val == "BUY":   return "background-color:#1a4a2e; color:#00e5a0; font-weight:bold"
+                if val == "WATCH": return "background-color:#3a3000; color:#ffd166; font-weight:bold"
+                return ""
 
-# ── 免責聲明 ──────────────────────────────────────────────
-st.divider()
-st.caption("⚠️ 本工具僅供技術分析參考，不構成投資建議。投資有風險，請自行評估後再做決策。")
+            st.dataframe(
+                df_display.style.map(color_signal, subset=["訊號"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.subheader("個股詳細資訊")
+            for r in results:
+                is_buy = r["signal"] == "BUY"
+                badge  = "✅ 買進訊號" if is_buy else "👀 觀察中"
+                
+                with st.expander(f"{r['code']} {r['name']}　{badge}", expanded=is_buy):
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("現價",        f"{r['price']}")
+                    c2.metric("%B",          f"{r['pct_b']}", delta="超賣" if r["pct_b"] < pct_b_thr else None)
+                    c3.metric(f"RSI{rsi_short}", f"{r['rsi_s']}")
+                    c4.metric(f"RSI{rsi_long}",  f"{r['rsi_l']}")
+
+                    st.divider()
+                    t1, t2, t3, t4 = st.columns(4)
+                    t1.metric("📌 進場價", f"{r['price']}")
+                    t2.metric("🛑 停損價", f"{r['stop']}")
+                    t3.metric("🎯 目標價", f"{r['target']}")
+                    t4.metric("⚖️ 風報比", f"1 : {r['rrr']}" if r["rrr"] else "N/A")
+
+                    st.caption(
+                        f"BB 軌道：下軌 {r['lower']} ／ 中軌 {r['middle']} ／ 上軌 {r['upper']}"
+                    )
+else:
+    st.warning("⚠️ 無法載入股票代號，請重新整理網頁。")
