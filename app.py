@@ -190,7 +190,24 @@ with st.sidebar:
         type="password", 
         value="https://discordapp.com/api/webhooks/1495088799875731556/Uyj88sZ2CjVjcPX841vNz_LoNmlcs9uX_22QZdXeQTavmOvm0N60Rl9lVFBaoCeFKGDI"
     )
-
+# 原本的這行網址輸入框
+    webhook = st.text_input("Webhook 網址", type="password", value="https://discordapp.com/api/webhooks/1495088799875731556/Uyj88sZ2CjVjcPX841vNz_LoNmlcs9uX_22QZdXeQTavmOvm0N60Rl9lVFBaoCeFKGDI")
+    
+    # 👇👇👇 請在這裡新增這段測試按鈕 👇👇👇
+    if st.button("🛠️ 測試 Discord 連線"):
+        if not webhook:
+            st.error("請先輸入網址！")
+        else:
+            try:
+                res = requests.post(webhook, json={"content": "✅ **測試訊息！** 如果你看到這行字，代表 Discord 連線完全正常！"}, timeout=5)
+                if res.status_code == 204:
+                    st.success("連線成功！請看你的 Discord！")
+                else:
+                    st.error(f"連線失敗！Discord 拒絕接收。狀態碼：{res.status_code}")
+                    st.write(res.text) # 印出真正的錯誤原因
+            except Exception as e:
+                st.error(f"連線發生嚴重錯誤：{e}")
+    # 👆👆👆 新增結束 👆👆👆
     st.divider()
     st.caption("策略邏輯")
     st.info("🟢 **買進**：%B < 門檻 + RSI黃金交叉\n\n🔴 **賣出**：價破上軌或RSI>70 + 死亡交叉")
