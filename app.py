@@ -764,8 +764,8 @@ with st.sidebar:
     st.divider()
     st.markdown("**📋 回測設定**")
     hold_days      = st.slider("持有天數", 3, 30, 10, step=1)
-    stop_loss_pct  = st.slider("停損 %", 0.02, 0.15, 0.05, step=0.01, format="%.0%%")
-    take_profit_pct= st.slider("停利 %", 0.05, 0.30, 0.10, step=0.01, format="%.0%%")
+    stop_loss_pct  = st.slider("停損 %", 0.02, 0.15, 0.05, step=0.01, format="%.2f")
+    take_profit_pct= st.slider("停利 %", 0.05, 0.30, 0.10, step=0.01, format="%.2f")
     min_win_rate   = st.slider("最低勝率篩選 %", 0, 80, 0, step=5)
 
     st.divider()
