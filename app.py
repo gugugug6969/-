@@ -3,314 +3,223 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-import time
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import urllib3
 
 # 關閉不安全連線的警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ── 頁面設定 ──────────────────────────────────────────────
-st.set_page_config(
-    page_title="台股全自動選股系統",
-    page_icon="🚀",
-    layout="wide",
-)
+st.set_page_config(page_title="台股 AI 專業操盤室", page_icon="📈", layout="wide")
 
-st.title("🚀 台股全自動選股系統")
-st.caption("自動獲取全台股清單 · 批次運算防封鎖 · 支援 Discord 自動推播")
+st.title("📈 台股 AI 專業操盤室")
+st.caption("全自動掃描 | 爆量濾網 | 專業 K 線 | 歷史回測 | Discord 推播")
 
-# ── Discord 發送工具 ─────────────────────────────────────────
+# ── Discord 工具 ─────────────────────────────────────────
 def send_discord(msg, webhook_url):
-    """把文字傳送到 Discord 的工具"""
-    if not webhook_url: 
-        return
+    if not webhook_url: return False
     try:
-        requests.post(webhook_url, json={"content": msg}, timeout=5)
+        res = requests.post(webhook_url, json={"content": msg}, timeout=5)
+        return res.status_code in [200, 204]
     except:
-        pass
+        return False
 
-# ── 1. 自動抓取全台股名稱對照表 (繞過憑證檢查版) ────────────────
+# ── 1. 自動抓取全台股清單 (繞過憑證) ────────────────────────
 @st.cache_data(ttl=86400)
 def get_all_stock_names():
     names = {}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        # 抓上市清單
         res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=headers, timeout=10, verify=False)
         if res.status_code == 200:
             for item in res.json():
-                if len(item["Code"]) == 4 and item["Code"].isdigit(): 
-                    names[item["Code"]] = item["Name"]
-                    
-        # 抓上櫃清單
+                if len(item["Code"]) == 4 and item["Code"].isdigit(): names[item["Code"]] = item["Name"]
         res2 = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=headers, timeout=10, verify=False)
         if res2.status_code == 200:
             for item in res2.json():
-                if len(item["SecuritiesCompanyCode"]) == 4 and item["SecuritiesCompanyCode"].isdigit():
-                    names[item["SecuritiesCompanyCode"]] = item["CompanyName"]
-                    
-    except Exception as e:
-        st.error(f"⚠️ 抓取股票代號失敗。錯誤訊息：{e}")
+                code = item.get("SecuritiesCompanyCode")
+                if code and len(code) == 4: names[code] = item.get("CompanyName", code)
+    except:
         names = {"2330": "台積電", "2317": "鴻海", "2454": "聯發科"}
     return names
 
-STOCK_NAMES = get_all_stock_names()
-ALL_CODES = list(STOCK_NAMES.keys())
+STOCK_DICT = get_all_stock_names()
+ALL_CODES = list(STOCK_DICT.keys())
 
-# ── 2. 指標計算函式 ──────────────────────────────────────────
-def calc_bollinger(closes: np.ndarray, period: int, multiplier: float):
-    upper, middle, lower, pct_b = [], [], [], []
-    for i in range(len(closes)):
-        if i < period - 1:
-            upper.append(np.nan); middle.append(np.nan)
-            lower.append(np.nan); pct_b.append(np.nan)
-            continue
-        sl = closes[i - period + 1 : i + 1]
-        mean = sl.mean()
-        std  = sl.std(ddof=0)
-        u = mean + multiplier * std
-        l = mean - multiplier * std
-        upper.append(u); middle.append(mean); lower.append(l)
-        pct_b.append(0.5 if std == 0 else (closes[i] - l) / (u - l))
-    return (np.array(upper), np.array(middle),
-            np.array(lower), np.array(pct_b))
-
-def calc_rsi(closes: np.ndarray, period: int):
-    rsi = np.full(len(closes), np.nan)
-    for i in range(period, len(closes)):
-        changes = np.diff(closes[i - period : i + 1])
-        gains  = changes[changes > 0].sum()
-        losses = -changes[changes < 0].sum()
-        avg_g  = gains  / period
-        avg_l  = losses / period
-        rsi[i] = 100 if avg_l == 0 else 100 - 100 / (1 + avg_g / avg_l)
-    return rsi
-
-# ── 3. 批次抓取資料 (快取24小時防 Yahoo 封鎖) ────────────────
-@st.cache_data(ttl=86400)
-def fetch_all_closes(codes: list):
-    tickers = [f"{c}.TW" for c in codes]
-    df = yf.download(tickers, period="6mo", interval="1d", auto_adjust=True, threads=True, progress=False)
+# ── 2. 指標計算邏輯 ──────────────────────────────────────────
+def calc_indicators(df, params):
+    df = df.copy()
+    # BBands
+    df['MA'] = df['Close'].rolling(params['bb_period']).mean()
+    df['STD'] = df['Close'].rolling(params['bb_period']).std(ddof=0)
+    df['Upper'] = df['MA'] + params['bb_std'] * df['STD']
+    df['Lower'] = df['MA'] - params['bb_std'] * df['STD']
+    df['pct_b'] = (df['Close'] - df['Lower']) / (df['Upper'] - df['Lower'])
+    
+    # RSI
+    def get_rsi(series, p):
+        delta = series.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(p).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(p).mean()
+        return 100 - (100 / (1 + gain/loss))
+    
+    df['RSI_S'] = get_rsi(df['Close'], params['rsi_short'])
+    df['RSI_L'] = get_rsi(df['Close'], params['rsi_long'])
+    
+    # 成交量均線 (20日)
+    df['Vol_MA'] = df['Volume'].rolling(20).mean()
     return df
 
-# ── 4. 單股分析 ──────────────────────────────────────────────
-def analyze(code, closes, params):
-    bb_period   = params["bb_period"]
-    bb_std      = params["bb_std"]
-    pct_b_thr   = params["pct_b"]
-    grace       = params["grace"]
-    rsi_s_per   = params["rsi_short"]
-    rsi_l_per   = params["rsi_long"]
+# ── 3. 核心分析與回測引擎 ────────────────────────────────────
+def analyze_stock(code, df, params):
+    df = calc_indicators(df, params)
+    if len(df) < 40: return None
+    
+    n = -1
+    last = df.iloc[n]
+    prev = df.iloc[n-1]
+    
+    # 訊號邏輯
+    pct_b_ok = (df['pct_b'].iloc[n-params['grace']:].min() < params['pct_b'])
+    golden_cross = (prev['RSI_S'] <= prev['RSI_L'] and last['RSI_S'] > last['RSI_L'])
+    # 爆量濾網：今日成交量 > 20日均量 * 倍數
+    vol_ok = (last['Volume'] > last['Vol_MA'] * params['vol_mult'])
+    
+    buy_signal = pct_b_ok and golden_cross and vol_ok
+    
+    # 回測邏輯：計算過去一年的勝率
+    backtest_profit = 0
+    trades = 0
+    for i in range(40, len(df)-10):
+        p_pct_b = (df['pct_b'].iloc[i-5:i].min() < params['pct_b'])
+        p_cross = (df['RSI_S'].iloc[i-1] <= df['RSI_L'].iloc[i-1] and df['RSI_S'].iloc[i] > df['RSI_L'].iloc[i])
+        if p_pct_b and p_cross:
+            profit = (df['Close'].iloc[i+10] / df['Close'].iloc[i]) - 1
+            backtest_profit += profit
+            trades += 1
+    
+    win_rate = f"{(backtest_profit/trades*100):.1f}%" if trades > 0 else "無歷史買點"
 
-    min_len = max(bb_period, rsi_l_per) + grace + 5
-    if len(closes) < min_len:
-        return None
+    if buy_signal or (pct_b_ok and not golden_cross):
+        return {
+            "code": code, "name": STOCK_DICT.get(code, code),
+            "signal": "BUY" if buy_signal else "WATCH",
+            "price": round(last['Close'], 2),
+            "vol_ratio": round(last['Volume']/last['Vol_MA'], 2),
+            "stop": round(last['Lower'], 2), "target": round(last['Upper'], 2),
+            "win_rate": win_rate, "df": df
+        }
+    return None
 
-    upper, middle, lower, pct_b = calc_bollinger(closes, bb_period, bb_std)
-    rsi_s = calc_rsi(closes, rsi_s_per)
-    rsi_l = calc_rsi(closes, rsi_l_per)
+# ── 4. 專業 K 線繪圖引擎 ────────────────────────────────────
+def plot_chart(df, name):
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
+    # K線
+    fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"), row=1, col=1)
+    # BBands
+    fig.add_trace(go.Scatter(x=df.index, y=df['Upper'], line=dict(color='orange', width=1), name="上軌"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['Lower'], line=dict(color='orange', width=1), name="下軌"), row=1, col=1)
+    # RSI
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI_S'], name="RSI短", line=dict(color='blue')), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['RSI_L'], name="RSI長", line=dict(color='red')), row=2, col=1)
+    
+    fig.update_layout(height=500, xaxis_rangeslider_visible=False, margin=dict(t=30, b=0, l=0, r=0))
+    return fig
 
-    n = len(closes)
-    last_price  = closes[-1]
-    last_pct_b  = pct_b[-1]
-    last_rsi_s  = rsi_s[-1]
-    last_rsi_l  = rsi_l[-1]
-    last_upper  = upper[-1]
-    last_lower  = lower[-1]
-    last_middle = middle[-1]
-
-    if any(np.isnan([last_pct_b, last_rsi_s, last_rsi_l])):
-        return None
-
-    pct_b_ok = any(
-        (not np.isnan(pct_b[i]) and pct_b[i] < pct_b_thr)
-        for i in range(n - grace, n)
-    )
-
-    golden = False
-    for i in range(max(1, n - 3), n):
-        if not any(np.isnan([rsi_s[i], rsi_l[i], rsi_s[i-1], rsi_l[i-1]])):
-            if rsi_s[i-1] <= rsi_l[i-1] and rsi_s[i] > rsi_l[i]:
-                golden = True; break
-
-    death = (
-        not any(np.isnan([rsi_s[-1], rsi_l[-1], rsi_s[-2], rsi_l[-2]]))
-        and rsi_s[-2] >= rsi_l[-2] and rsi_s[-1] < rsi_l[-1]
-    )
-
-    overbought  = last_price >= last_upper or last_rsi_s > 70
-    sell_signal = overbought and death
-    buy_signal  = pct_b_ok and golden and not sell_signal
-    watch_signal = (
-        pct_b_ok and not golden and not sell_signal
-        and last_rsi_s < last_rsi_l
-        and (last_rsi_l - last_rsi_s) < 5
-    )
-
-    if not buy_signal and not watch_signal:
-        return None
-
-    risk   = last_price - last_lower
-    reward = last_upper  - last_price
-    rrr    = round(reward / risk, 2) if risk > 0 else None
-
-    return {
-        "code":    code,
-        "name":    STOCK_NAMES.get(code, code),
-        "signal":  "BUY" if buy_signal else "WATCH",
-        "price":   round(last_price,  2),
-        "pct_b":   round(last_pct_b,  3),
-        "rsi_s":   round(last_rsi_s,  1),
-        "rsi_l":   round(last_rsi_l,  1),
-        "upper":   round(last_upper,  2),
-        "middle":  round(last_middle, 2),
-        "lower":   round(last_lower,  2),
-        "stop":    round(last_lower,  2),
-        "target":  round(last_upper,  2),
-        "rrr":     rrr,
-    }
-
-# ── 側邊欄：參數設定 ──────────────────────────────────────
+# ── 5. 側邊欄與參數 ──────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ 參數設定")
-    bb_period  = st.number_input("BB 週期（天）",     min_value=5,   max_value=50,  value=20)
-    bb_std     = st.number_input("BB 標準差倍數",    min_value=1.0, max_value=3.0, value=2.0, step=0.1)
-    pct_b_thr  = st.number_input("%B 超賣門檻",      min_value=0.0, max_value=0.5, value=0.2, step=0.05)
-    grace      = st.number_input("寬容期（天）",      min_value=1,   max_value=14,  value=7)
-    rsi_short  = st.number_input("RSI 短天期",        min_value=3,   max_value=14,  value=6)
-    rsi_long   = st.number_input("RSI 長天期",        min_value=7,   max_value=30,  value=12)
-
+    st.header("⚙️ 操盤參數")
+    vol_mult = st.slider("爆量倍數 (成交量 > 20MA x ?)", 0.5, 3.0, 1.2)
+    bb_period = st.number_input("BB 週期", 5, 40, 20)
+    pct_b_thr = st.slider("%B 超賣門檻", 0.0, 0.5, 0.2)
+    
     st.divider()
-    st.header("🔔 通知設定")
-    # 這裡已經幫你把剛剛的 Discord 網址放進去了！
-    discord_url = st.text_input(
-        "Discord Webhook 網址", 
-        type="password", 
-        value="https://discordapp.com/api/webhooks/1495088799875731556/Uyj88sZ2CjVjcPX841vNz_LoNmlcs9uX_22QZdXeQTavmOvm0N60Rl9lVFBaoCeFKGDI"
-    )
-# 原本的這行網址輸入框
+    st.header("🔔 Discord 推播與測試")
     webhook = st.text_input("Webhook 網址", type="password", value="https://discordapp.com/api/webhooks/1495088799875731556/Uyj88sZ2CjVjcPX841vNz_LoNmlcs9uX_22QZdXeQTavmOvm0N60Rl9lVFBaoCeFKGDI")
     
-    # 👇👇👇 請在這裡新增這段測試按鈕 👇👇👇
-    if st.button("🛠️ 測試 Discord 連線"):
+    if st.button("🛠️ 測試發送 Discord", use_container_width=True):
         if not webhook:
             st.error("請先輸入網址！")
         else:
-            try:
-                res = requests.post(webhook, json={"content": "✅ **測試訊息！** 如果你看到這行字，代表 Discord 連線完全正常！"}, timeout=5)
-                if res.status_code == 204:
-                    st.success("連線成功！請看你的 Discord！")
+            with st.spinner("測試發送中..."):
+                success = send_discord("✅ **【台股 AI 操盤室】連線測試成功！**", webhook)
+                if success:
+                    st.success("連線成功！請檢查你的 Discord。")
                 else:
-                    st.error(f"連線失敗！Discord 拒絕接收。狀態碼：{res.status_code}")
-                    st.write(res.text) # 印出真正的錯誤原因
-            except Exception as e:
-                st.error(f"連線發生嚴重錯誤：{e}")
-    # 👆👆👆 新增結束 👆👆👆
+                    st.error("連線失敗！請確認網址是否正確。")
+    
     st.divider()
-    st.caption("策略邏輯")
-    st.info("🟢 **買進**：%B < 門檻 + RSI黃金交叉\n\n🔴 **賣出**：價破上軌或RSI>70 + 死亡交叉")
-    st.success(f"📌 系統已自動載入 {len(ALL_CODES)} 檔上市櫃股票")
+    st.success(f"已載入 {len(ALL_CODES)} 檔標的")
 
-params = {
-    "bb_period": bb_period, "bb_std": bb_std,
-    "pct_b": pct_b_thr,    "grace": grace,
-    "rsi_short": rsi_short, "rsi_long": rsi_long,
-}
+params = {"bb_period": bb_period, "bb_std": 2.0, "pct_b": pct_b_thr, "grace": 5, "rsi_short": 6, "rsi_long": 12, "vol_mult": vol_mult}
 
-# ── 主頁面：掃描按鈕 ──────────────────────────────────────
-st.subheader("一鍵全自動掃描")
-st.write("點擊下方按鈕，系統將自動下載全市場歷史股價並套用策略篩選。")
+# ── 6. 主程式執行 ──────────────────────────────────────────
+if st.button(f"🔥 開始全自動掃描 (尋找起漲股)", type="primary", use_container_width=True):
+    results = []
+    # 預設掃描前 300 檔熱門股
+    test_codes = ALL_CODES[:300] 
+    
+    with st.spinner(f"正在下載 {len(test_codes)} 檔股票大數據 (包含成交量)..."):
+        raw_data = yf.download([f"{c}.TW" for c in test_codes], period="1y", interval="1d", group_by='ticker', threads=True, progress=False)
 
-# 如果 ALL_CODES 有資料，代表有成功抓到股票名單
-if ALL_CODES:
-    if st.button(f"🔥 開始掃描全台股 ({len(ALL_CODES)} 檔)", type="primary", use_container_width=True):
-        results = []
-        
-        with st.spinner(f"正在向 Yahoo Finance 下載資料，請稍候..."):
-            df_all = fetch_all_closes(ALL_CODES)
+    prog = st.progress(0, text="運算指標中...")
+    for i, code in enumerate(test_codes):
+        if i % 10 == 0: prog.progress((i+1)/len(test_codes))
+        try:
+            df = raw_data[f"{code}.TW"].dropna()
+            if df.empty: continue
+            res = analyze_stock(code, df, params)
+            if res: results.append(res)
+        except: continue
+    prog.empty()
 
-        prog = st.progress(0, text="準備運算...")
-        
-        for i, code in enumerate(ALL_CODES):
-            if i % 20 == 0:
-                prog.progress((i + 1) / len(ALL_CODES), text=f"分析指標中... ({i+1}/{len(ALL_CODES)})")
-            
-            try:
-                ticker_str = f"{code}.TW"
-                if "Close" in df_all and ticker_str in df_all["Close"].columns:
-                    closes = df_all["Close"][ticker_str].dropna().to_numpy()
-                else:
-                    continue
+    results.sort(key=lambda x: 0 if x["signal"] == "BUY" else 1)
 
-                r = analyze(code, closes, params)
-                if r:
-                    results.append(r)
-            except Exception:
-                continue
-
-        prog.empty()
-        results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
-
-        # ── 結果顯示與 Discord 推播 ─────────────────────────────────
-        st.divider()
-        st.metric("✅ 符合條件標的", f"{len(results)} 檔")
-
-        # 🚀 在這裡發送 Discord 訊息！
-        buy_list = [r for r in results if r["signal"] == "BUY"]
-        if buy_list and discord_url:
-            lines = ["🚀 **【台股全自動掃描】發現買進訊號！** 🚀", ""]
-            for r in buy_list:
-                lines.append(f"✅ **{r['code']} {r['name']}**")
-                lines.append(f"　 價格: {r['price']} | 目標: {r['target']} | 停損: {r['stop']}")
-            lines.append("\n*快打開系統查看詳細資訊！*")
-            
-            send_discord("\n".join(lines), discord_url)
-            st.toast("🔔 買進訊號已同步推送到 Discord！")
-
-        if not results:
-            st.info("目前沒有股票符合條件，可嘗試放寬左側參數或等待更好時機。")
+    # ── 🚀 Discord 實戰推播 (終極防呆版) ────────────────────────
+    buys = [r for r in results if r['signal'] == "BUY"]
+    if webhook:
+        if not buys:
+            # 沒股票時，發送空手通知
+            send_discord("📉 **【台股 AI 操盤室】今日掃描完成。**\n目前市場無符合「爆量 + 起漲」條件的標的，系統建議空手觀望。", webhook)
+            st.info("今日無買進訊號，已發送『空手觀望』通知至 Discord。")
         else:
-            df = pd.DataFrame(results)
-            df_display = df[["code","name","signal","price","pct_b",
-                              "rsi_s","rsi_l","stop","target","rrr"]].copy()
-            df_display.columns = ["代號","名稱","訊號","現價","%B",
-                                   f"RSI{rsi_short}",f"RSI{rsi_long}",
-                                   "停損","目標","風報比"]
-
-            def color_signal(val):
-                if val == "BUY":   return "background-color:#1a4a2e; color:#00e5a0; font-weight:bold"
-                if val == "WATCH": return "background-color:#3a3000; color:#ffd166; font-weight:bold"
-                return ""
-
-            st.dataframe(
-                df_display.style.map(color_signal, subset=["訊號"]),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.subheader("個股詳細資訊")
-            for r in results:
-                is_buy = r["signal"] == "BUY"
-                badge  = "✅ 買進訊號" if is_buy else "👀 觀察中"
+            # 有股票時，最多只發前 15 檔，避免字數超過 2000 字被 Discord 封殺
+            top_buys = buys[:15]
+            msg = f"🚀 **【AI 操盤室】發現 {len(buys)} 檔爆量起漲標的！** 🚀\n" 
+            if len(buys) > 15:
+                msg += "*(⚠️ 訊號過多，為符合版面僅列出前 15 檔最強勢標的)*\n\n"
+            else:
+                msg += "\n"
                 
-                with st.expander(f"{r['code']} {r['name']}　{badge}", expanded=is_buy):
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("現價",        f"{r['price']}")
-                    c2.metric("%B",          f"{r['pct_b']}", delta="超賣" if r["pct_b"] < pct_b_thr else None)
-                    c3.metric(f"RSI{rsi_short}", f"{r['rsi_s']}")
-                    c4.metric(f"RSI{rsi_long}",  f"{r['rsi_l']}")
+            msg += "\n".join([f"✅ **{r['code']} {r['name']}** | 價:{r['price']} | 量比:{r['vol_ratio']}x | 勝率:{r['win_rate']}" for r in top_buys])
+            
+            success = send_discord(msg, webhook)
+            if success:
+                st.toast("🔔 買進訊號已成功推送到 Discord！")
+            else:
+                st.error("推播失敗：可能遭遇未知的網路問題。")
+    # ─────────────────────────────────────────────────────────
 
-                    st.divider()
-                    t1, t2, t3, t4 = st.columns(4)
-                    t1.metric("📌 進場價", f"{r['price']}")
-                    t2.metric("🛑 停損價", f"{r['stop']}")
-                    t3.metric("🎯 目標價", f"{r['target']}")
-                    t4.metric("⚖️ 風報比", f"1 : {r['rrr']}" if r["rrr"] else "N/A")
+    # 顯示結果
+    if not results:
+        st.info("今日無符合爆量與指標之標的。")
+    else:
+        st.subheader(f"✅ 篩選結果 (共 {len(results)} 檔符合)")
+        df_res = pd.DataFrame(results).drop(columns=['df'])
+        st.dataframe(df_res, use_container_width=True, hide_index=True)
 
-                    st.caption(
-                        f"BB 軌道：下軌 {r['lower']} ／ 中軌 {r['middle']} ／ 上軌 {r['upper']}"
-                    )
-else:
-    st.warning("⚠️ 無法載入股票代號，請重新整理網頁。")
+        st.divider()
+        st.subheader("📊 專業技術分析與歷史回測看板")
+        for r in results:
+            with st.expander(f"{r['code']} {r['name']} | 訊號: {r['signal']} | 量比: {r['vol_ratio']}x | 歷史回測: {r['win_rate']}", expanded=(r['signal']=="BUY")):
+                c1, c2, c3 = st.columns([1,1,2])
+                c1.metric("現價", r['price'])
+                c2.metric("成交量比 (昨日)", f"{r['vol_ratio']} 倍")
+                c3.metric("預估目標價 (上軌)", r['target'])
+                
+                # 畫圖
+                st.plotly_chart(plot_chart(r['df'], r['name']), use_container_width=True)
+
+st.divider()
+st.caption("⚠️ 本系統僅供技術分析參考，不構成投資建議。投資有風險，請自行評估後再做決策。")
