@@ -2,31 +2,43 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+import time
 
 # ── 頁面設定 ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="台股選股系統",
-    page_icon="📈",
+    page_title="台股全自動選股系統",
+    page_icon="🚀",
     layout="wide",
 )
 
-st.title("📈 台股選股系統")
-st.caption("BBand + RSI 雙指標策略 · 收盤後掃股 · 資料來源：Yahoo Finance (yfinance)")
+st.title("🚀 台股全自動選股系統")
+st.caption("自動獲取全台股清單 · 批次運算防封鎖 · BBand + RSI 雙指標策略")
 
-# ── 股票名稱對照表 ────────────────────────────────────────
-STOCK_NAMES = {
-    "2317": "鴻海", "2330": "台積電", "2454": "聯發科", "2412": "中華電",
-    "2382": "廣達", "2308": "台達電", "3711": "日月光投控", "2881": "富邦金",
-    "2882": "國泰金", "2884": "玉山金", "6505": "台塑化", "1301": "台塑",
-    "1303": "南亞",  "2002": "中鋼",  "2886": "兆豐金", "2303": "聯電",
-    "3034": "聯詠",  "2379": "瑞昱",  "2357": "華碩",   "2353": "宏碁",
-    "2395": "研華",  "2376": "技嘉",  "4938": "和碩",   "2474": "可成",
-    "3008": "大立光","2207": "和泰車","2327": "國巨",   "2408": "南亞科",
-    "2337": "旺宏",  "5871": "中租-KY","2892": "第一金","2880": "華南金",
-    "2891": "中信金","2887": "台新金","2888": "新光金",
-}
+# ── 1. 自動抓取全台股名稱對照表 (快取24小時) ────────────────
+@st.cache_data(ttl=86400)
+def get_all_stock_names():
+    names = {}
+    try:
+        # 抓上市清單
+        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", timeout=5).json()
+        for item in res:
+            if len(item["Code"]) == 4 and item["Code"].isdigit(): # 只抓正規四碼股票，避開權證
+                names[item["Code"]] = item["Name"]
+        # 抓上櫃清單
+        res = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=5).json()
+        for item in res:
+            if len(item["SecuritiesCompanyCode"]) == 4 and item["SecuritiesCompanyCode"].isdigit():
+                names[item["SecuritiesCompanyCode"]] = item["CompanyName"]
+    except:
+        # 萬一證交所當機，給幾個保底的預設值
+        names = {"2317": "鴻海", "2330": "台積電", "2454": "聯發科"}
+    return names
 
-# ── 指標計算函式 ──────────────────────────────────────────
+STOCK_NAMES = get_all_stock_names()
+ALL_CODES = list(STOCK_NAMES.keys())
+
+# ── 2. 指標計算函式 ──────────────────────────────────────────
 def calc_bollinger(closes: np.ndarray, period: int, multiplier: float):
     upper, middle, lower, pct_b = [], [], [], []
     for i in range(len(closes)):
@@ -55,16 +67,15 @@ def calc_rsi(closes: np.ndarray, period: int):
         rsi[i] = 100 if avg_l == 0 else 100 - 100 / (1 + avg_g / avg_l)
     return rsi
 
-# ── 抓資料 ────────────────────────────────────────────────
-@st.cache_data(ttl=3600)
-def fetch_closes(code: str) -> np.ndarray | None:
-    ticker = yf.Ticker(code + ".TW")
-    df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
-    if df.empty or len(df) < 30:
-        return None
-    return df["Close"].dropna().to_numpy()
+# ── 3. 批次抓取資料 (快取24小時防 Yahoo 封鎖) ────────────────
+@st.cache_data(ttl=86400)
+def fetch_all_closes(codes: list):
+    tickers = [f"{c}.TW" for c in codes]
+    # threads=True 讓下載速度變快，progress=False 關閉終端機進度條
+    df = yf.download(tickers, period="6mo", interval="1d", auto_adjust=True, threads=True, progress=False)
+    return df
 
-# ── 單股分析 ──────────────────────────────────────────────
+# ── 4. 單股分析 ──────────────────────────────────────────────
 def analyze(code, closes, params):
     bb_period   = params["bb_period"]
     bb_std      = params["bb_std"]
@@ -157,6 +168,7 @@ with st.sidebar:
     st.divider()
     st.caption("策略邏輯")
     st.info("🟢 **買進**：%B < 門檻 + RSI黃金交叉\n\n🔴 **賣出**：價破上軌或RSI>70 + 死亡交叉")
+    st.success(f"📌 系統已自動載入 {len(ALL_CODES)} 檔上市櫃股票")
 
 params = {
     "bb_period": bb_period, "bb_std": bb_std,
@@ -164,50 +176,51 @@ params = {
     "rsi_short": rsi_short, "rsi_long": rsi_long,
 }
 
-# ── 主頁面：股票輸入 ──────────────────────────────────────
-st.subheader("輸入股票清單")
-raw = st.text_area(
-    "台股代號（逗號或換行分隔）",
-    value="2317, 2330, 2454, 2412, 2382, 2308, 3711, 2881, 2882, 2884, 6505, 1301, 1303, 2002, 2886",
-    height=80,
-)
-codes = [c.strip() for c in raw.replace("\n", ",").split(",") if c.strip()]
-st.caption(f"共 {len(codes)} 檔待掃描")
+# ── 主頁面：掃描按鈕 ──────────────────────────────────────
+st.subheader("一鍵全自動掃描")
+st.write("點擊下方按鈕，系統將自動下載全市場歷史股價並套用策略篩選。")
 
-# ── 掃描按鈕 ──────────────────────────────────────────────
-if st.button("🔍 開始掃股", type="primary", use_container_width=True):
+if st.button(f"🔥 開始掃描全台股 ({len(ALL_CODES)} 檔)", type="primary", use_container_width=True):
     results = []
-    errors  = []
-    prog    = st.progress(0, text="準備中...")
-    status  = st.empty()
+    
+    # 步驟 1：批次下載資料
+    with st.spinner(f"正在向 Yahoo Finance 打包下載資料，這可能需要 1~2 分鐘，請耐心等候...（每日僅需下載一次）"):
+        df_all = fetch_all_closes(ALL_CODES)
 
-    for i, code in enumerate(codes):
-        prog.progress((i + 1) / len(codes), text=f"掃描中... {code} ({i+1}/{len(codes)})")
-        closes = fetch_closes(code)
-        if closes is None:
-            errors.append(code)
-        else:
+    # 步驟 2：本地端高速運算
+    prog = st.progress(0, text="準備運算...")
+    
+    for i, code in enumerate(ALL_CODES):
+        # 每 20 檔更新一次進度條，避免畫面卡頓
+        if i % 20 == 0:
+            prog.progress((i + 1) / len(ALL_CODES), text=f"分析指標中... ({i+1}/{len(ALL_CODES)})")
+        
+        try:
+            # 從批次下載的整包資料中，抽出單一檔股票的收盤價
+            ticker_str = f"{code}.TW"
+            if "Close" in df_all and ticker_str in df_all["Close"].columns:
+                closes = df_all["Close"][ticker_str].dropna().to_numpy()
+            else:
+                continue
+
+            # 進入原本的分析邏輯
             r = analyze(code, closes, params)
             if r:
                 results.append(r)
+        except Exception:
+            continue
 
     prog.empty()
 
     # 排序：BUY > WATCH，再按 RRR 降冪
-    results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1,
-                                -(x["rrr"] or 0)))
+    results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
 
     # ── 結果顯示 ──────────────────────────────────────────
     st.divider()
-    col_l, col_r = st.columns(2)
-    col_l.metric("✅ 符合條件", f"{len(results)} 檔")
-    col_r.metric("❌ 抓取失敗", f"{len(errors)} 檔")
-
-    if errors:
-        st.warning(f"以下代號抓取失敗（可能代號錯誤或無資料）：{', '.join(errors)}")
+    st.metric("✅ 符合條件標的", f"{len(results)} 檔")
 
     if not results:
-        st.info("目前沒有股票符合條件，可嘗試放寬參數或等待更好時機。")
+        st.info("目前沒有股票符合條件，可嘗試放寬左側參數或等待更好時機。")
     else:
         # 表格總覽
         df = pd.DataFrame(results)
@@ -233,8 +246,7 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
         for r in results:
             is_buy = r["signal"] == "BUY"
             badge  = "✅ 買進訊號" if is_buy else "👀 觀察中"
-            color  = "green" if is_buy else "orange"
-
+            
             with st.expander(f"{r['code']} {r['name']}　{badge}", expanded=is_buy):
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("現價",        f"{r['price']}")
