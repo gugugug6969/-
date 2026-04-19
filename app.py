@@ -1,3 +1,31 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  台股 AI 狙擊手  ULTRA v8.0  — ABSOLUTE MAXIMUM EVOLUTION                    ║
+║                                                                              ║
+║  NEW v8 FEATURES:                                                            ║
+║  ✦ 籌碼分析：外資/投信/自營商三大法人買賣超                                   ║
+║  ✦ 財務健康分數：流動比率、負債比、速動比率                                   ║
+║  ✦ 產業比較：同產業 PE/ROE/殖利率對比                                        ║
+║  ✦ 即時警示系統：價格突破/跌破 MA、RSI 極值警報                               ║
+║  ✦ 自選股清單：加入/移除/匯出 Watch List                                      ║
+║  ✦ 回測模擬：基於信號回測歷史績效                                             ║
+║  ✦ 風險評估：Beta、波動率、最大回撤                                           ║
+║  ✦ 多空力道儀表板：多空比、買賣超動能圖                                       ║
+║  ✦ 股價預測帶：均值回歸區間 + 標準差帶                                        ║
+║  ✦ 完整 KPI 統計：夏普比率、年化報酬                                         ║
+║  ✦ 掃描結果 CSV 匯出                                                          ║
+║  ✦ LINE Notify 推播支援                                                       ║
+║  ✦ 財報日曆提醒                                                               ║
+║  ✦ 成交量異常偵測                                                             ║
+║  ✦ 支撐壓力位計算（Pivot Point）                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+pip install streamlit yfinance pandas numpy requests plotly \
+            apscheduler beautifulsoup4 lxml urllib3
+
+streamlit run taiwan_stock_ultra_v8.py
+"""
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -27,7 +55,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.html("""
+# ═════════════════════════════════════════════════════════════════════════════
+# CSS — Bloomberg Terminal × Cyberpunk MAX v8
+# ═════════════════════════════════════════════════════════════════════════════
+st.markdown(r"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
 
@@ -49,8 +80,6 @@ st.html("""
   --glow-b: 0 0 20px rgba(45,127,255,0.25);
   --glow-y: 0 0 20px rgba(255,190,0,0.25);
 }
-</style>
-""")
 
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body,[class*="css"]{font-family:var(--sans);background:var(--bg0);color:var(--t0)}
