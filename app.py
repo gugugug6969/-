@@ -223,7 +223,7 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
             return ""
 
         st.dataframe(
-            df_display.style.applymap(color_signal, subset=["訊號"]),
+            df_display.style.map(color_signal, subset=["訊號"]),
             use_container_width=True,
             hide_index=True,
         )
