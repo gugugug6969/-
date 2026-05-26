@@ -13,7 +13,7 @@ st.set_page_config(
 st.title("📈 台股選股系統")
 st.caption("BBand + RSI 雙指標策略 · 收盤後掃股 · 資料來源：Yahoo Finance (yfinance)")
 
-# ── 股票名稱對照表 ────────────────────────────────────────
+# ── 股票名稱對照表（優先使用，沒有的就從 Yahoo 抓）──────
 STOCK_NAMES = {
     "2317": "鴻海", "2330": "台積電", "2454": "聯發科", "2412": "中華電",
     "2382": "廣達", "2308": "台達電", "3711": "日月光投控", "2881": "富邦金",
@@ -55,17 +55,40 @@ def calc_rsi(closes: np.ndarray, period: int):
         rsi[i] = 100 if avg_l == 0 else 100 - 100 / (1 + avg_g / avg_l)
     return rsi
 
-# ── 抓資料 ────────────────────────────────────────────────
+# ── 抓資料（同時取名稱）────────────────────────────────────
 @st.cache_data(ttl=3600)
-def fetch_closes(code: str) -> np.ndarray | None:
+def fetch_stock_data(code: str) -> tuple[np.ndarray | None, str]:
+    """
+    回傳 (closes_array, 中文名稱)
+    名稱優先順序：STOCK_NAMES 字典 → Yahoo longName/shortName → 代號本身
+    """
     ticker = yf.Ticker(code + ".TW")
+
+    # 取收盤價
     df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
     if df.empty or len(df) < 30:
-        return None
-    return df["Close"].dropna().to_numpy()
+        return None, STOCK_NAMES.get(code, code)
+
+    closes = df["Close"].dropna().to_numpy()
+
+    # 取名稱（字典優先；沒有才問 Yahoo）
+    if code in STOCK_NAMES:
+        name = STOCK_NAMES[code]
+    else:
+        try:
+            info = ticker.info
+            # longName 通常是完整中文名，shortName 是短名
+            raw_name = info.get("longName") or info.get("shortName") or code
+            # Yahoo 回傳的名稱可能帶英文後綴，例如 "Wiwynn Corp."
+            # 直接使用即可，使用者看得懂
+            name = raw_name
+        except Exception:
+            name = code
+
+    return closes, name
 
 # ── 單股分析 ──────────────────────────────────────────────
-def analyze(code, closes, params):
+def analyze(code, closes, name, params):
     bb_period   = params["bb_period"]
     bb_std      = params["bb_std"]
     pct_b_thr   = params["pct_b"]
@@ -93,20 +116,17 @@ def analyze(code, closes, params):
     if any(np.isnan([last_pct_b, last_rsi_s, last_rsi_l])):
         return None
 
-    # %B 寬容期
     pct_b_ok = any(
         (not np.isnan(pct_b[i]) and pct_b[i] < pct_b_thr)
         for i in range(n - grace, n)
     )
 
-    # RSI 黃金交叉（近3日內）
     golden = False
     for i in range(max(1, n - 3), n):
         if not any(np.isnan([rsi_s[i], rsi_l[i], rsi_s[i-1], rsi_l[i-1]])):
             if rsi_s[i-1] <= rsi_l[i-1] and rsi_s[i] > rsi_l[i]:
                 golden = True; break
 
-    # RSI 死亡交叉
     death = (
         not any(np.isnan([rsi_s[-1], rsi_l[-1], rsi_s[-2], rsi_l[-2]]))
         and rsi_s[-2] >= rsi_l[-2] and rsi_s[-1] < rsi_l[-1]
@@ -130,7 +150,7 @@ def analyze(code, closes, params):
 
     return {
         "code":    code,
-        "name":    STOCK_NAMES.get(code, code),
+        "name":    name,   # ← 直接使用傳入的名稱
         "signal":  "BUY" if buy_signal else "WATCH",
         "price":   round(last_price,  2),
         "pct_b":   round(last_pct_b,  3),
@@ -185,25 +205,22 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
     results = []
     errors  = []
     prog    = st.progress(0, text="準備中...")
-    status  = st.empty()
 
     for i, code in enumerate(codes):
         prog.progress((i + 1) / len(codes), text=f"掃描中... {code} ({i+1}/{len(codes)})")
-        closes = fetch_closes(code)
+        closes, name = fetch_stock_data(code)   # ← 改這裡
         if closes is None:
             errors.append(code)
         else:
-            r = analyze(code, closes, params)
+            r = analyze(code, closes, name, params)   # ← 傳入 name
             if r:
                 results.append(r)
 
     prog.empty()
 
-    # 排序：BUY > WATCH，再按 RRR 降冪
     results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1,
                                 -(x["rrr"] or 0)))
 
-    # ── 結果顯示 ──────────────────────────────────────────
     st.divider()
     col_l, col_r = st.columns(2)
     col_l.metric("✅ 符合條件", f"{len(results)} 檔")
@@ -215,7 +232,6 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
     if not results:
         st.info("目前沒有股票符合條件，可嘗試放寬參數或等待更好時機。")
     else:
-        # 表格總覽
         df = pd.DataFrame(results)
         df_display = df[["code","name","signal","price","pct_b",
                           "rsi_s","rsi_l","stop","target","rrr"]].copy()
@@ -234,12 +250,10 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
             hide_index=True,
         )
 
-        # 個股詳細卡片
         st.subheader("個股詳細資訊")
         for r in results:
             is_buy = r["signal"] == "BUY"
             badge  = "✅ 買進訊號" if is_buy else "👀 觀察中"
-            color  = "green" if is_buy else "orange"
 
             with st.expander(f"{r['code']} {r['name']}　{badge}", expanded=is_buy):
                 c1, c2, c3, c4 = st.columns(4)
