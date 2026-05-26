@@ -6,7 +6,7 @@ import twstock  # ← 記得在最上方新增這行
 
 # ... 這裡保留你的 STOCK_NAMES 字典 ...
 
-@st.cache_data(ttl=3600)
+
 def fetch_stock_data(code: str) -> tuple[np.ndarray | None, str]:
     ticker = yf.Ticker(code + ".TW")
 
