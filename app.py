@@ -2,32 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import twstock  # ← 記得在最上方新增這行
-
-# ... 這裡保留你的 STOCK_NAMES 字典 ...
-
-
-def fetch_stock_data(code: str) -> tuple[np.ndarray | None, str]:
-    ticker = yf.Ticker(code + ".TW")
-
-    # 1. 取收盤價
-    df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
-    if df.empty or len(df) < 30:
-        return None, STOCK_NAMES.get(code, code)
-
-    closes = df["Close"].dropna().to_numpy()
-
-    # 2. 取名稱
-    if code in STOCK_NAMES:
-        name = STOCK_NAMES[code]
-    else:
-        try:
-            stock_info = twstock.codes.get(code)
-            name = stock_info.name if stock_info and stock_info.name else code
-        except Exception:
-            name = code
-
-    return closes, name
 
 # ── 頁面設定 ──────────────────────────────────────────────
 st.set_page_config(
