@@ -2,38 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import twstock  # 記得在檔案頂部 import
-
-@st.cache_data(ttl=3600)
-def fetch_stock_data(code: str) -> tuple[np.ndarray | None, str]:
-    """
-    回傳 (closes_array, 中文名稱)
-    優先順序：STOCK_NAMES 字典 → twstock 內建資料庫 → 代號本身
-    """
-    ticker = yf.Ticker(code + ".TW")
-
-    # 1. 先行取收盤價
-    df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
-    if df.empty or len(df) < 30:
-        return None, STOCK_NAMES.get(code, code)
-
-    closes = df["Close"].dropna().to_numpy()
-
-    # 2. 判斷名稱
-    if code in STOCK_NAMES:
-        name = STOCK_NAMES[code]
-    else:
-        try:
-            # 使用 twstock 內建股票字典查詢
-            stock_info = twstock.codes.get(code)
-            if stock_info and stock_info.name:
-                name = stock_info.name
-            else:
-                name = code
-        except Exception:
-            name = code
-
-    return closes, name
 
 # ── 頁面設定 ──────────────────────────────────────────────
 st.set_page_config(
