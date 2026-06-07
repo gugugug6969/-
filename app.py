@@ -15,6 +15,20 @@ st.set_page_config(
 st.title("📈 台股選股系統")
 st.caption("BBand + RSI 雙指標策略 · 收盤後掃股 · 資料來源：Yahoo Finance (yfinance)")
 
+# ── 從 secrets.toml 讀取 LINE 設定 ───────────────────────
+def load_line_secrets():
+    """讀取 .streamlit/secrets.toml 裡的 [line] 區塊，缺少時回傳 None"""
+    try:
+        return (
+            st.secrets["line"]["channel_id"],
+            st.secrets["line"]["channel_secret"],
+            st.secrets["line"]["user_id"],
+        )
+    except Exception:
+        return None, None, None
+
+LINE_CHANNEL_ID, LINE_CHANNEL_SECRET, LINE_USER_ID = load_line_secrets()
+
 # ── 股票名稱對照表 ────────────────────────────────────────
 STOCK_NAMES = {
     "2301": "光寶科", "2303": "聯電", "2308": "台達電", "2312": "金寶", "2313": "華通",
@@ -41,34 +55,29 @@ STOCK_NAMES = {
     "2897": "王道銀", "5871": "中租-KY", "5876": "上海商銀", "5880": "合庫金"
 }
 
-# ── 指標計算函式 ──────────────────────────────────────────
-def calc_bollinger(closes: np.ndarray, period: int, multiplier: float):
+# ── 指標計算 ──────────────────────────────────────────────
+def calc_bollinger(closes, period, multiplier):
     upper, middle, lower, pct_b = [], [], [], []
     for i in range(len(closes)):
         if i < period - 1:
             upper.append(np.nan); middle.append(np.nan)
             lower.append(np.nan); pct_b.append(np.nan)
             continue
-        sl   = closes[i - period + 1 : i + 1]
-        mean = sl.mean()
-        std  = sl.std(ddof=0)
-        u = mean + multiplier * std
-        l = mean - multiplier * std
+        sl = closes[i - period + 1 : i + 1]
+        mean, std = sl.mean(), sl.std(ddof=0)
+        u, l = mean + multiplier * std, mean - multiplier * std
         upper.append(u); middle.append(mean); lower.append(l)
         pct_b.append(0.5 if std == 0 else (closes[i] - l) / (u - l))
-    return (np.array(upper), np.array(middle),
-            np.array(lower), np.array(pct_b))
+    return np.array(upper), np.array(middle), np.array(lower), np.array(pct_b)
 
-def calc_rsi(closes: np.ndarray, period: int) -> np.ndarray:
-    """標準 Wilder's RSI（EMA 遞推）"""
+def calc_rsi(closes, period):
     rsi = np.full(len(closes), np.nan)
     if len(closes) <= period:
         return rsi
     changes = np.diff(closes)
     gains   = np.where(changes > 0, changes,  0.0)
     losses  = np.where(changes < 0, -changes, 0.0)
-    avg_g = gains[:period].mean()
-    avg_l = losses[:period].mean()
+    avg_g, avg_l = gains[:period].mean(), losses[:period].mean()
     rsi[period] = 100.0 if avg_l == 0 else 100 - 100 / (1 + avg_g / avg_l)
     for i in range(period + 1, len(closes)):
         avg_g = (avg_g * (period - 1) + gains[i - 1])  / period
@@ -78,7 +87,7 @@ def calc_rsi(closes: np.ndarray, period: int) -> np.ndarray:
 
 # ── 抓資料 ────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
-def fetch_stock_data(code: str) -> tuple[np.ndarray | None, str]:
+def fetch_stock_data(code):
     try:
         ticker = yf.Ticker(code + ".TW")
         df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
@@ -106,28 +115,20 @@ def analyze(code, closes, name, params):
     rsi_s_per = params["rsi_short"]
     rsi_l_per = params["rsi_long"]
 
-    min_len = max(bb_period, rsi_l_per) + grace + 5
-    if len(closes) < min_len:
+    if len(closes) < max(bb_period, rsi_l_per) + grace + 5:
         return None
 
     upper, middle, lower, pct_b = calc_bollinger(closes, bb_period, bb_std)
     rsi_s = calc_rsi(closes, rsi_s_per)
     rsi_l = calc_rsi(closes, rsi_l_per)
+    n = len(closes)
 
-    n           = len(closes)
-    last_price  = closes[-1]
-    last_pct_b  = pct_b[-1]
-    last_rsi_s  = rsi_s[-1]
-    last_rsi_l  = rsi_l[-1]
-    last_upper  = upper[-1]
-    last_lower  = lower[-1]
-    last_middle = middle[-1]
-
-    if any(np.isnan([last_pct_b, last_rsi_s, last_rsi_l])):
+    vals = [pct_b[-1], rsi_s[-1], rsi_l[-1]]
+    if any(np.isnan(vals)):
         return None
 
     pct_b_ok = any(
-        (not np.isnan(pct_b[i]) and pct_b[i] < pct_b_thr)
+        not np.isnan(pct_b[i]) and pct_b[i] < pct_b_thr
         for i in range(n - grace, n)
     )
 
@@ -141,110 +142,118 @@ def analyze(code, closes, name, params):
     if n >= 2 and not any(np.isnan([rsi_s[-1], rsi_l[-1], rsi_s[-2], rsi_l[-2]])):
         death = rsi_s[-2] >= rsi_l[-2] and rsi_s[-1] < rsi_l[-1]
 
-    overbought   = last_price >= last_upper or last_rsi_s > 70
+    overbought   = closes[-1] >= upper[-1] or rsi_s[-1] > 70
     sell_signal  = overbought and death
     buy_signal   = pct_b_ok and golden and not sell_signal
     watch_signal = (
         pct_b_ok and not golden and not sell_signal
-        and last_rsi_s < last_rsi_l
-        and (last_rsi_l - last_rsi_s) < 5
+        and rsi_s[-1] < rsi_l[-1] and (rsi_l[-1] - rsi_s[-1]) < 5
     )
 
     if not buy_signal and not watch_signal:
         return None
 
-    risk   = last_price - last_lower
-    reward = last_upper  - last_price
+    risk   = closes[-1] - lower[-1]
+    reward = upper[-1]  - closes[-1]
     rrr    = round(reward / risk, 2) if risk > 0 else None
 
     return {
-        "code":   code, "name":   name,
-        "signal": "BUY" if buy_signal else "WATCH",
-        "price":  round(last_price,  2), "pct_b":  round(last_pct_b,  3),
-        "rsi_s":  round(last_rsi_s,  1), "rsi_l":  round(last_rsi_l,  1),
-        "upper":  round(last_upper,  2), "middle": round(last_middle, 2),
-        "lower":  round(last_lower,  2), "stop":   round(last_lower,  2),
-        "target": round(last_upper,  2), "rrr":    rrr,
+        "code":   code,   "name":   name,
+        "signal": "BUY"   if buy_signal else "WATCH",
+        "price":  round(closes[-1],  2), "pct_b":  round(pct_b[-1],  3),
+        "rsi_s":  round(rsi_s[-1],   1), "rsi_l":  round(rsi_l[-1],  1),
+        "upper":  round(upper[-1],   2), "middle": round(middle[-1], 2),
+        "lower":  round(lower[-1],   2), "stop":   round(lower[-1],  2),
+        "target": round(upper[-1],   2), "rrr":    rrr,
     }
 
-# ── LINE Messaging API 工具函式 ───────────────────────────
-def get_channel_access_token(channel_id: str, channel_secret: str) -> str | None:
-    """用 Channel ID + Secret 向 LINE 換取 Access Token（有效期 30 天）"""
+# ── LINE Messaging API ────────────────────────────────────
+def get_channel_access_token(channel_id, channel_secret):
     try:
         resp = requests.post(
             "https://api.line.me/v2/oauth/accessToken",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type":    "client_credentials",
-                "client_id":     channel_id,
-                "client_secret": channel_secret,
-            },
+            data={"grant_type": "client_credentials",
+                  "client_id": channel_id, "client_secret": channel_secret},
             timeout=10,
         )
-        if resp.status_code == 200:
-            return resp.json().get("access_token")
-        return None
+        return resp.json().get("access_token") if resp.status_code == 200 else None
     except Exception:
         return None
 
-def line_get_user_id(token: str) -> str | None:
-    """取得最近加 Bot 為好友的使用者 user_id"""
-    try:
-        resp = requests.get(
-            "https://api.line.me/v2/bot/followers/ids",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=10,
-        )
-        uids = resp.json().get("userIds", [])
-        return uids[0] if uids else None
-    except Exception:
-        return None
-
-def line_push_message(token: str, user_id: str,
-                      results: list, rsi_short: int, rsi_long: int) -> tuple[bool, str]:
-    """推播掃股結果，超過 4800 字自動切分多則"""
+def build_report_message(results, rsi_short, rsi_long, params):
+    """
+    組成報表風格的純文字訊息。
+    格式：標題列 → BUY 區塊 → WATCH 區塊，每股一行，欄位對齊。
+    """
     now   = datetime.now().strftime("%Y/%m/%d %H:%M")
     buys  = [r for r in results if r["signal"] == "BUY"]
     watch = [r for r in results if r["signal"] == "WATCH"]
 
-    def fmt(r):
-        rrr_str = f"1:{r['rrr']}" if r["rrr"] else "N/A"
-        return (
-            f"\n【{r['code']} {r['name']}】\n"
-            f"  現價 {r['price']}  %B {r['pct_b']}\n"
-            f"  RSI{rsi_short} {r['rsi_s']} / RSI{rsi_long} {r['rsi_l']}\n"
-            f"  停損 {r['stop']}  目標 {r['target']}  風報比 {rrr_str}"
-        )
+    # 表頭
+    header = (
+        f"📈 台股掃描報表｜{now}\n"
+        f"參數：BB{params['bb_period']}期/{params['bb_std']}σ  "
+        f"%B<{params['pct_b']}  RSI{rsi_short}/{rsi_long}\n"
+        f"{'━'*30}\n"
+    )
 
-    sections = [f"📈 台股選股掃描結果\n🕐 {now}\n{'─'*22}"]
-    if buys:
-        sections.append(f"\n✅ 買進訊號（{len(buys)} 檔）")
-        sections += [fmt(r) for r in buys]
-    if watch:
-        sections.append(f"\n👀 觀察中（{len(watch)} 檔）")
-        sections += [fmt(r) for r in watch]
+    def section(title, emoji, rows):
+        if not rows:
+            return ""
+        lines = [f"{emoji} {title}（{len(rows)} 檔）\n"]
+        # 欄位標題
+        lines.append(f"{'代號+名稱':<10} {'現價':>6} {'%B':>5} "
+                     f"{'RS短':>5} {'RS長':>5} {'風報比':>6}")
+        lines.append("─" * 42)
+        for r in rows:
+            rrr = f"1:{r['rrr']}" if r["rrr"] else " N/A"
+            name_short = r['name'][:4]          # 名稱最多 4 字，避免跑版
+            label = f"{r['code']}{name_short}"
+            lines.append(
+                f"{label:<10} {r['price']:>6} {r['pct_b']:>5.2f} "
+                f"{r['rsi_s']:>5.1f} {r['rsi_l']:>5.1f} {rrr:>6}"
+            )
+        lines.append("")
+        # 附上停損/目標詳細資訊
+        lines.append("  進場 / 停損 / 目標")
+        for r in rows:
+            lines.append(f"  {r['code']} {r['name'][:4]}：{r['price']} / {r['stop']} / {r['target']}")
+        return "\n".join(lines)
+
+    body = ""
+    body += section("買進訊號", "✅", buys)
+    if buys and watch:
+        body += "\n" + "━" * 30 + "\n"
+    body += section("觀察中", "👀", watch)
+
     if not buys and not watch:
-        sections.append("\n本次掃描無符合條件股票。")
-    sections.append("\n⚠️ 僅供技術分析參考，非投資建議")
+        body = "本次掃描無符合條件股票。\n"
 
-    # 切分成每則 ≤4800 字
-    MAX_LEN, messages, current = 4800, [], ""
-    for block in sections:
-        if len(current) + len(block) > MAX_LEN:
-            if current: messages.append(current.strip())
-            current = block
-        else:
-            current += block
-    if current.strip():
-        messages.append(current.strip())
+    footer = f"\n{'━'*30}\n⚠️ 僅供技術分析參考，非投資建議"
+    return header + body + footer
+
+def line_push(token, user_id, text):
+    """切分並推播純文字訊息（每則上限 4800 字元）"""
+    MAX = 4800
+    chunks = []
+    while len(text) > MAX:
+        cut = text.rfind("\n", 0, MAX)
+        cut = cut if cut > 0 else MAX
+        chunks.append(text[:cut].strip())
+        text = text[cut:].strip()
+    if text:
+        chunks.append(text)
 
     all_ok, err_msg = True, ""
-    for chunk in [messages[i:i+5] for i in range(0, len(messages), 5)]:
+    for batch in [chunks[i:i+5] for i in range(0, len(chunks), 5)]:
         try:
             resp = requests.post(
                 "https://api.line.me/v2/bot/message/push",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"to": user_id, "messages": [{"type": "text", "text": m} for m in chunk]},
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"},
+                json={"to": user_id,
+                      "messages": [{"type": "text", "text": m} for m in batch]},
                 timeout=10,
             )
             if resp.status_code != 200:
@@ -252,12 +261,11 @@ def line_push_message(token: str, user_id: str,
                 err_msg = resp.json().get("message", f"HTTP {resp.status_code}")
         except Exception as e:
             all_ok, err_msg = False, str(e)
-
     return all_ok, err_msg
 
-# ── 側邊欄：參數設定 ──────────────────────────────────────
+# ── 側邊欄：策略參數 ──────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ 參數設定")
+    st.header("⚙️ 策略參數")
     bb_period = st.number_input("BB 週期（天）",  min_value=5,   max_value=50,  value=20)
     bb_std    = st.number_input("BB 標準差倍數",  min_value=1.0, max_value=3.0, value=2.0, step=0.1)
     pct_b_thr = st.number_input("%B 超賣門檻",    min_value=0.0, max_value=0.5, value=0.2, step=0.05)
@@ -267,47 +275,21 @@ with st.sidebar:
 
     st.divider()
 
-    # ── LINE 設定區 ───────────────────────────────────────
-    st.header("🔔 LINE 推播設定")
-    st.caption("[LINE Developers Console](https://developers.line.biz/console/) → Messaging API Channel → Basic settings")
-
-    line_channel_id = st.text_input(
-        "Channel ID",
-        placeholder="例：2010319445",
-    )
-    line_channel_secret = st.text_input(
-        "Channel Secret",
-        type="password",
-        placeholder="貼上 Channel Secret",
-    )
-    line_user_id = st.text_input(
-        "你的 LINE User ID",
-        placeholder="U 開頭的 33 碼，點下方按鈕自動取得",
-    )
-
-    # 自動取得 User ID
-    if line_channel_id and line_channel_secret:
-        if st.button("🔍 自動取得我的 User ID", use_container_width=True):
-            with st.spinner("換取 Token 中..."):
-                tmp_token = get_channel_access_token(line_channel_id, line_channel_secret)
-            if tmp_token:
-                uid = line_get_user_id(tmp_token)
-                if uid:
-                    st.success(f"取得成功！")
-                    st.code(uid)
-                    st.info("請複製上方 ID 貼到「你的 LINE User ID」欄位。")
-                else:
-                    st.error("找不到 User ID。\n請先用 LINE 對你的 Bot 傳任意一則訊息，再重試。")
-            else:
-                st.error("Token 換取失敗，請確認 Channel ID / Secret 是否正確。")
-
-    # 狀態提示
-    if line_channel_id and line_channel_secret and line_user_id:
-        st.success("✅ LINE 推播已就緒")
-    elif line_channel_id or line_channel_secret:
-        st.warning("⚠️ 請填齊所有 LINE 欄位")
+    # LINE 狀態顯示（不讓使用者看到或修改設定值）
+    st.header("🔔 LINE 推播")
+    line_ready = bool(LINE_CHANNEL_ID and LINE_CHANNEL_SECRET and LINE_USER_ID)
+    if line_ready:
+        st.success("✅ 已設定（secrets.toml）")
     else:
-        st.caption("未設定，掃股結果不會推播。")
+        st.warning("⚠️ 未設定\n\n請編輯 `.streamlit/secrets.toml`")
+        with st.expander("查看設定格式"):
+            st.code("""
+# .streamlit/secrets.toml
+[line]
+channel_id     = "你的 Channel ID"
+channel_secret = "你的 Channel Secret"
+user_id        = "U 開頭的 User ID"
+""", language="toml")
 
     st.divider()
     st.caption("策略邏輯")
@@ -336,8 +318,6 @@ codes = [c.strip() for c in raw.replace("\n", ",").split(",") if c.strip()]
 st.caption(f"共 {len(codes)} 檔待掃描")
 
 # ── 掃描按鈕 ──────────────────────────────────────────────
-line_ready = bool(line_channel_id and line_channel_secret and line_user_id)
-
 if st.button("🔍 開始掃股", type="primary", use_container_width=True):
     results, errors = [], []
     prog = st.progress(0, text="準備中...")
@@ -357,18 +337,17 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
 
     # ── 自動 LINE 推播 ────────────────────────────────────
     if line_ready:
-        with st.spinner("📲 換取 Token 並傳送 LINE 推播中..."):
-            token = get_channel_access_token(line_channel_id, line_channel_secret)
+        with st.spinner("📲 傳送 LINE 推播中..."):
+            token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
             if token:
-                ok, err = line_push_message(token, line_user_id, results, rsi_short, rsi_long)
+                report = build_report_message(results, rsi_short, rsi_long, params)
+                ok, err = line_push(token, LINE_USER_ID, report)
                 if ok:
                     st.success("✅ LINE 推播已送出！")
                 else:
                     st.error(f"❌ 推播失敗：{err}")
             else:
-                st.error("❌ Token 換取失敗，請確認 Channel ID / Secret。")
-    else:
-        st.info("💡 在左側填入 LINE 設定即可自動推播結果。")
+                st.error("❌ Token 換取失敗，請確認 secrets.toml 內容。")
 
     st.divider()
     col_l, col_r = st.columns(2)
