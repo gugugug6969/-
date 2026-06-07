@@ -1,4 +1,5 @@
 gradio
+streamlit
 yfinance
 pandas
 numpy
