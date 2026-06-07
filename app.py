@@ -168,38 +168,46 @@ def analyze(code, closes, name, params):
     }
 
 # ── LINE Messaging API 工具函式 ───────────────────────────
+def get_channel_access_token(channel_id: str, channel_secret: str) -> str | None:
+    """用 Channel ID + Secret 向 LINE 換取 Access Token（有效期 30 天）"""
+    try:
+        resp = requests.post(
+            "https://api.line.me/v2/oauth/accessToken",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type":    "client_credentials",
+                "client_id":     channel_id,
+                "client_secret": channel_secret,
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("access_token")
+        return None
+    except Exception:
+        return None
+
 def line_get_user_id(token: str) -> str | None:
-    """
-    取得最近傳訊給 Bot 的使用者 user_id。
-    呼叫 /v2/bot/followers/ids，回傳第一個 userId（通常就是你自己）。
-    """
+    """取得最近加 Bot 為好友的使用者 user_id"""
     try:
         resp = requests.get(
             "https://api.line.me/v2/bot/followers/ids",
             headers={"Authorization": f"Bearer {token}"},
             timeout=10,
         )
-        data = resp.json()
-        uids = data.get("userIds", [])
+        uids = resp.json().get("userIds", [])
         return uids[0] if uids else None
     except Exception:
         return None
 
 def line_push_message(token: str, user_id: str,
                       results: list, rsi_short: int, rsi_long: int) -> tuple[bool, str]:
-    """
-    用 LINE Messaging API push message 推播掃股結果。
-    LINE 單則文字訊息上限 5000 字元，若超過會自動切分多則。
-    回傳 (成功與否, 錯誤訊息)
-    """
+    """推播掃股結果，超過 4800 字自動切分多則"""
     now   = datetime.now().strftime("%Y/%m/%d %H:%M")
     buys  = [r for r in results if r["signal"] == "BUY"]
     watch = [r for r in results if r["signal"] == "WATCH"]
 
-    # 組合訊息區塊
-    header = f"📈 台股選股掃描結果\n🕐 {now}\n{'─'*22}"
-
-    def fmt_stock(r):
+    def fmt(r):
         rrr_str = f"1:{r['rrr']}" if r["rrr"] else "N/A"
         return (
             f"\n【{r['code']} {r['name']}】\n"
@@ -208,57 +216,42 @@ def line_push_message(token: str, user_id: str,
             f"  停損 {r['stop']}  目標 {r['target']}  風報比 {rrr_str}"
         )
 
-    sections = [header]
+    sections = [f"📈 台股選股掃描結果\n🕐 {now}\n{'─'*22}"]
     if buys:
         sections.append(f"\n✅ 買進訊號（{len(buys)} 檔）")
-        for r in buys:
-            sections.append(fmt_stock(r))
+        sections += [fmt(r) for r in buys]
     if watch:
         sections.append(f"\n👀 觀察中（{len(watch)} 檔）")
-        for r in watch:
-            sections.append(fmt_stock(r))
+        sections += [fmt(r) for r in watch]
     if not buys and not watch:
         sections.append("\n本次掃描無符合條件股票。")
     sections.append("\n⚠️ 僅供技術分析參考，非投資建議")
 
-    # 切分訊息（每則上限 4800 字元，留 buffer）
-    MAX_LEN = 4800
-    messages = []
-    current  = ""
+    # 切分成每則 ≤4800 字
+    MAX_LEN, messages, current = 4800, [], ""
     for block in sections:
         if len(current) + len(block) > MAX_LEN:
-            if current:
-                messages.append(current.strip())
+            if current: messages.append(current.strip())
             current = block
         else:
             current += block
     if current.strip():
         messages.append(current.strip())
 
-    # LINE Messaging API 每次最多送 5 則
-    all_ok  = True
-    err_msg = ""
+    all_ok, err_msg = True, ""
     for chunk in [messages[i:i+5] for i in range(0, len(messages), 5)]:
-        payload = {
-            "to": user_id,
-            "messages": [{"type": "text", "text": m} for m in chunk],
-        }
         try:
             resp = requests.post(
                 "https://api.line.me/v2/bot/message/push",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type":  "application/json",
-                },
-                json=payload,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"to": user_id, "messages": [{"type": "text", "text": m} for m in chunk]},
                 timeout=10,
             )
             if resp.status_code != 200:
                 all_ok  = False
                 err_msg = resp.json().get("message", f"HTTP {resp.status_code}")
         except Exception as e:
-            all_ok  = False
-            err_msg = str(e)
+            all_ok, err_msg = False, str(e)
 
     return all_ok, err_msg
 
@@ -274,44 +267,47 @@ with st.sidebar:
 
     st.divider()
 
-    # ── LINE Messaging API 設定區 ─────────────────────────
+    # ── LINE 設定區 ───────────────────────────────────────
     st.header("🔔 LINE 推播設定")
-    st.caption(
-        "需先至 [LINE Developers](https://developers.line.biz/console/) "
-        "建立 Messaging API Channel 並取得 Token。"
-    )
+    st.caption("[LINE Developers Console](https://developers.line.biz/console/) → Messaging API Channel → Basic settings")
 
-    line_token = st.text_input(
-        "Channel Access Token",
+    line_channel_id = st.text_input(
+        "Channel ID",
+        placeholder="例：2010319445",
+    )
+    line_channel_secret = st.text_input(
+        "Channel Secret",
         type="password",
-        placeholder="貼上 Channel Access Token",
+        placeholder="貼上 Channel Secret",
     )
-
     line_user_id = st.text_input(
         "你的 LINE User ID",
-        placeholder="U 開頭的 33 碼字串",
-        help="設定 Token 後點下方按鈕自動取得",
+        placeholder="U 開頭的 33 碼，點下方按鈕自動取得",
     )
 
-    # 自動取得 User ID 按鈕
-    if line_token:
+    # 自動取得 User ID
+    if line_channel_id and line_channel_secret:
         if st.button("🔍 自動取得我的 User ID", use_container_width=True):
-            uid = line_get_user_id(line_token)
-            if uid:
-                st.success(f"取得成功：`{uid}`")
-                st.info("請將上方 ID 複製貼到「你的 LINE User ID」欄位。")
+            with st.spinner("換取 Token 中..."):
+                tmp_token = get_channel_access_token(line_channel_id, line_channel_secret)
+            if tmp_token:
+                uid = line_get_user_id(tmp_token)
+                if uid:
+                    st.success(f"取得成功！")
+                    st.code(uid)
+                    st.info("請複製上方 ID 貼到「你的 LINE User ID」欄位。")
+                else:
+                    st.error("找不到 User ID。\n請先用 LINE 對你的 Bot 傳任意一則訊息，再重試。")
             else:
-                st.error(
-                    "找不到 User ID。\n\n"
-                    "請先用 LINE 對你的 Bot 傳任意一則訊息，再重試。"
-                )
+                st.error("Token 換取失敗，請確認 Channel ID / Secret 是否正確。")
 
-    if line_token and line_user_id:
+    # 狀態提示
+    if line_channel_id and line_channel_secret and line_user_id:
         st.success("✅ LINE 推播已就緒")
-    elif line_token:
-        st.warning("⚠️ 請填入 User ID")
+    elif line_channel_id or line_channel_secret:
+        st.warning("⚠️ 請填齊所有 LINE 欄位")
     else:
-        st.caption("未設定 Token，掃股結果不會推播。")
+        st.caption("未設定，掃股結果不會推播。")
 
     st.divider()
     st.caption("策略邏輯")
@@ -340,10 +336,11 @@ codes = [c.strip() for c in raw.replace("\n", ",").split(",") if c.strip()]
 st.caption(f"共 {len(codes)} 檔待掃描")
 
 # ── 掃描按鈕 ──────────────────────────────────────────────
+line_ready = bool(line_channel_id and line_channel_secret and line_user_id)
+
 if st.button("🔍 開始掃股", type="primary", use_container_width=True):
-    results = []
-    errors  = []
-    prog    = st.progress(0, text="準備中...")
+    results, errors = [], []
+    prog = st.progress(0, text="準備中...")
 
     for i, code in enumerate(codes):
         prog.progress((i + 1) / len(codes), text=f"掃描中... {code} ({i+1}/{len(codes)})")
@@ -359,19 +356,19 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
     results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
 
     # ── 自動 LINE 推播 ────────────────────────────────────
-    if line_token and line_user_id:
-        with st.spinner("📲 傳送 LINE 推播中..."):
-            ok, err = line_push_message(
-                line_token, line_user_id, results, rsi_short, rsi_long
-            )
-        if ok:
-            st.success("✅ LINE 推播已送出！")
-        else:
-            st.error(f"❌ LINE 推播失敗：{err}")
-    elif not line_token:
-        st.info("💡 在左側設定 LINE Token 即可自動推播結果。")
+    if line_ready:
+        with st.spinner("📲 換取 Token 並傳送 LINE 推播中..."):
+            token = get_channel_access_token(line_channel_id, line_channel_secret)
+            if token:
+                ok, err = line_push_message(token, line_user_id, results, rsi_short, rsi_long)
+                if ok:
+                    st.success("✅ LINE 推播已送出！")
+                else:
+                    st.error(f"❌ 推播失敗：{err}")
+            else:
+                st.error("❌ Token 換取失敗，請確認 Channel ID / Secret。")
     else:
-        st.warning("⚠️ 請在左側填入 LINE User ID 才能推播。")
+        st.info("💡 在左側填入 LINE 設定即可自動推播結果。")
 
     st.divider()
     col_l, col_r = st.columns(2)
@@ -379,7 +376,7 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
     col_r.metric("❌ 抓取失敗", f"{len(errors)} 檔")
 
     if errors:
-        st.warning(f"以下代號抓取失敗（可能代號錯誤或無資料）：{', '.join(errors)}")
+        st.warning(f"以下代號抓取失敗：{', '.join(errors)}")
 
     if not results:
         st.info("目前沒有股票符合條件，可嘗試放寬參數或等待更好時機。")
@@ -388,8 +385,7 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
         df_display = df[["code","name","signal","price","pct_b",
                           "rsi_s","rsi_l","stop","target","rrr"]].copy()
         df_display.columns = ["代號","名稱","訊號","現價","%B",
-                               f"RSI{rsi_short}",f"RSI{rsi_long}",
-                               "停損","目標","風報比"]
+                               f"RSI{rsi_short}",f"RSI{rsi_long}","停損","目標","風報比"]
 
         def color_signal(val):
             if val == "BUY":   return "background-color:#1a4a2e; color:#00e5a0; font-weight:bold"
@@ -398,8 +394,7 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
 
         st.dataframe(
             df_display.style.map(color_signal, subset=["訊號"]),
-            use_container_width=True,
-            hide_index=True,
+            use_container_width=True, hide_index=True,
         )
 
         st.subheader("個股詳細資訊")
@@ -418,9 +413,7 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
                 t2.metric("🛑 停損價", f"{r['stop']}")
                 t3.metric("🎯 目標價", f"{r['target']}")
                 t4.metric("⚖️ 風報比", f"1 : {r['rrr']}" if r["rrr"] else "N/A")
-                st.caption(
-                    f"BB 軌道：下軌 {r['lower']} ／ 中軌 {r['middle']} ／ 上軌 {r['upper']}"
-                )
+                st.caption(f"BB 軌道：下軌 {r['lower']} ／ 中軌 {r['middle']} ／ 上軌 {r['upper']}")
 
 # ── 免責聲明 ──────────────────────────────────────────────
 st.divider()
