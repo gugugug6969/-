@@ -2,6 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+from datetime import datetime
 
 # ── 頁面設定 ──────────────────────────────────────────────
 st.set_page_config(
@@ -13,10 +15,8 @@ st.set_page_config(
 st.title("📈 台股選股系統")
 st.caption("BBand + RSI 雙指標策略 · 收盤後掃股 · 資料來源：Yahoo Finance (yfinance)")
 
-# ── 股票名稱對照表（優先使用，沒有的就從 Yahoo 抓）──────
-# ── 股票名稱對照表（已補齊你清單內所有的 90 多檔股票） ──────
+# ── 股票名稱對照表 ────────────────────────────────────────
 STOCK_NAMES = {
-    # 權值/電子
     "2301": "光寶科", "2303": "聯電", "2308": "台達電", "2312": "金寶", "2313": "華通",
     "2317": "鴻海", "2323": "中環", "2324": "仁寶", "2327": "國巨", "2330": "台積電",
     "2337": "旺宏", "2344": "華邦電", "2345": "智邦", "2347": "聯強", "2352": "佳世達",
@@ -32,11 +32,9 @@ STOCK_NAMES = {
     "5434": "崇越", "6116": "彩晶", "6205": "詮欣", "6239": "力成", "6271": "同欣電",
     "6415": "矽力*-KY", "6456": "GIS-KY", "6669": "緯穎", "6770": "力積電", "6806": "昇佳電子",
     "8046": "南電",
-    # 傳產/重電/航運
     "1101": "台泥", "1102": "亞泥", "1301": "台塑", "1303": "南亞", "1503": "士電",
     "1513": "中興電", "1514": "亞力", "1519": "華城", "2002": "中鋼", "2207": "和泰車",
     "6505": "台塑化",
-    # 金融
     "2801": "彰銀", "2812": "台中銀", "2834": "臺企銀", "2880": "華南金", "2881": "富邦金",
     "2882": "國泰金", "2883": "凱基金", "2884": "玉山金", "2885": "元大金", "2886": "兆豐金",
     "2887": "台新金", "2889": "國票金", "2890": "永豐金", "2891": "中信金", "2892": "第一金",
@@ -51,7 +49,7 @@ def calc_bollinger(closes: np.ndarray, period: int, multiplier: float):
             upper.append(np.nan); middle.append(np.nan)
             lower.append(np.nan); pct_b.append(np.nan)
             continue
-        sl = closes[i - period + 1 : i + 1]
+        sl   = closes[i - period + 1 : i + 1]
         mean = sl.mean()
         std  = sl.std(ddof=0)
         u = mean + multiplier * std
@@ -61,57 +59,52 @@ def calc_bollinger(closes: np.ndarray, period: int, multiplier: float):
     return (np.array(upper), np.array(middle),
             np.array(lower), np.array(pct_b))
 
-def calc_rsi(closes: np.ndarray, period: int):
+def calc_rsi(closes: np.ndarray, period: int) -> np.ndarray:
+    """標準 Wilder's RSI（EMA 遞推）"""
     rsi = np.full(len(closes), np.nan)
-    for i in range(period, len(closes)):
-        changes = np.diff(closes[i - period : i + 1])
-        gains  = changes[changes > 0].sum()
-        losses = -changes[changes < 0].sum()
-        avg_g  = gains  / period
-        avg_l  = losses / period
-        rsi[i] = 100 if avg_l == 0 else 100 - 100 / (1 + avg_g / avg_l)
+    if len(closes) <= period:
+        return rsi
+    changes = np.diff(closes)
+    gains   = np.where(changes > 0, changes,  0.0)
+    losses  = np.where(changes < 0, -changes, 0.0)
+    avg_g = gains[:period].mean()
+    avg_l = losses[:period].mean()
+    rsi[period] = 100.0 if avg_l == 0 else 100 - 100 / (1 + avg_g / avg_l)
+    for i in range(period + 1, len(closes)):
+        avg_g = (avg_g * (period - 1) + gains[i - 1])  / period
+        avg_l = (avg_l * (period - 1) + losses[i - 1]) / period
+        rsi[i] = 100.0 if avg_l == 0 else 100 - 100 / (1 + avg_g / avg_l)
     return rsi
 
-# ── 抓資料（同時取名稱）────────────────────────────────────
+# ── 抓資料 ────────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def fetch_stock_data(code: str) -> tuple[np.ndarray | None, str]:
-    """
-    回傳 (closes_array, 中文名稱)
-    名稱優先順序：STOCK_NAMES 字典 → Yahoo longName/shortName → 代號本身
-    """
-    ticker = yf.Ticker(code + ".TW")
-
-    # 取收盤價
-    df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
-    if df.empty or len(df) < 30:
+    try:
+        ticker = yf.Ticker(code + ".TW")
+        df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
+        if df.empty or len(df) < 30:
+            return None, STOCK_NAMES.get(code, code)
+        closes = df["Close"].dropna().to_numpy()
+        if code in STOCK_NAMES:
+            name = STOCK_NAMES[code]
+        else:
+            try:
+                info = ticker.info
+                name = info.get("longName") or info.get("shortName") or code
+            except Exception:
+                name = code
+        return closes, name
+    except Exception:
         return None, STOCK_NAMES.get(code, code)
-
-    closes = df["Close"].dropna().to_numpy()
-
-    # 取名稱（字典優先；沒有才問 Yahoo）
-    if code in STOCK_NAMES:
-        name = STOCK_NAMES[code]
-    else:
-        try:
-            info = ticker.info
-            # longName 通常是完整中文名，shortName 是短名
-            raw_name = info.get("longName") or info.get("shortName") or code
-            # Yahoo 回傳的名稱可能帶英文後綴，例如 "Wiwynn Corp."
-            # 直接使用即可，使用者看得懂
-            name = raw_name
-        except Exception:
-            name = code
-
-    return closes, name
 
 # ── 單股分析 ──────────────────────────────────────────────
 def analyze(code, closes, name, params):
-    bb_period   = params["bb_period"]
-    bb_std      = params["bb_std"]
-    pct_b_thr   = params["pct_b"]
-    grace       = params["grace"]
-    rsi_s_per   = params["rsi_short"]
-    rsi_l_per   = params["rsi_long"]
+    bb_period = params["bb_period"]
+    bb_std    = params["bb_std"]
+    pct_b_thr = params["pct_b"]
+    grace     = params["grace"]
+    rsi_s_per = params["rsi_short"]
+    rsi_l_per = params["rsi_long"]
 
     min_len = max(bb_period, rsi_l_per) + grace + 5
     if len(closes) < min_len:
@@ -121,7 +114,7 @@ def analyze(code, closes, name, params):
     rsi_s = calc_rsi(closes, rsi_s_per)
     rsi_l = calc_rsi(closes, rsi_l_per)
 
-    n = len(closes)
+    n           = len(closes)
     last_price  = closes[-1]
     last_pct_b  = pct_b[-1]
     last_rsi_s  = rsi_s[-1]
@@ -144,14 +137,13 @@ def analyze(code, closes, name, params):
             if rsi_s[i-1] <= rsi_l[i-1] and rsi_s[i] > rsi_l[i]:
                 golden = True; break
 
-    death = (
-        not any(np.isnan([rsi_s[-1], rsi_l[-1], rsi_s[-2], rsi_l[-2]]))
-        and rsi_s[-2] >= rsi_l[-2] and rsi_s[-1] < rsi_l[-1]
-    )
+    death = False
+    if n >= 2 and not any(np.isnan([rsi_s[-1], rsi_l[-1], rsi_s[-2], rsi_l[-2]])):
+        death = rsi_s[-2] >= rsi_l[-2] and rsi_s[-1] < rsi_l[-1]
 
-    overbought  = last_price >= last_upper or last_rsi_s > 70
-    sell_signal = overbought and death
-    buy_signal  = pct_b_ok and golden and not sell_signal
+    overbought   = last_price >= last_upper or last_rsi_s > 70
+    sell_signal  = overbought and death
+    buy_signal   = pct_b_ok and golden and not sell_signal
     watch_signal = (
         pct_b_ok and not golden and not sell_signal
         and last_rsi_s < last_rsi_l
@@ -166,30 +158,160 @@ def analyze(code, closes, name, params):
     rrr    = round(reward / risk, 2) if risk > 0 else None
 
     return {
-        "code":    code,
-        "name":    name,   # ← 直接使用傳入的名稱
-        "signal":  "BUY" if buy_signal else "WATCH",
-        "price":   round(last_price,  2),
-        "pct_b":   round(last_pct_b,  3),
-        "rsi_s":   round(last_rsi_s,  1),
-        "rsi_l":   round(last_rsi_l,  1),
-        "upper":   round(last_upper,  2),
-        "middle":  round(last_middle, 2),
-        "lower":   round(last_lower,  2),
-        "stop":    round(last_lower,  2),
-        "target":  round(last_upper,  2),
-        "rrr":     rrr,
+        "code":   code, "name":   name,
+        "signal": "BUY" if buy_signal else "WATCH",
+        "price":  round(last_price,  2), "pct_b":  round(last_pct_b,  3),
+        "rsi_s":  round(last_rsi_s,  1), "rsi_l":  round(last_rsi_l,  1),
+        "upper":  round(last_upper,  2), "middle": round(last_middle, 2),
+        "lower":  round(last_lower,  2), "stop":   round(last_lower,  2),
+        "target": round(last_upper,  2), "rrr":    rrr,
     }
+
+# ── LINE Messaging API 工具函式 ───────────────────────────
+def line_get_user_id(token: str) -> str | None:
+    """
+    取得最近傳訊給 Bot 的使用者 user_id。
+    呼叫 /v2/bot/followers/ids，回傳第一個 userId（通常就是你自己）。
+    """
+    try:
+        resp = requests.get(
+            "https://api.line.me/v2/bot/followers/ids",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        data = resp.json()
+        uids = data.get("userIds", [])
+        return uids[0] if uids else None
+    except Exception:
+        return None
+
+def line_push_message(token: str, user_id: str,
+                      results: list, rsi_short: int, rsi_long: int) -> tuple[bool, str]:
+    """
+    用 LINE Messaging API push message 推播掃股結果。
+    LINE 單則文字訊息上限 5000 字元，若超過會自動切分多則。
+    回傳 (成功與否, 錯誤訊息)
+    """
+    now   = datetime.now().strftime("%Y/%m/%d %H:%M")
+    buys  = [r for r in results if r["signal"] == "BUY"]
+    watch = [r for r in results if r["signal"] == "WATCH"]
+
+    # 組合訊息區塊
+    header = f"📈 台股選股掃描結果\n🕐 {now}\n{'─'*22}"
+
+    def fmt_stock(r):
+        rrr_str = f"1:{r['rrr']}" if r["rrr"] else "N/A"
+        return (
+            f"\n【{r['code']} {r['name']}】\n"
+            f"  現價 {r['price']}  %B {r['pct_b']}\n"
+            f"  RSI{rsi_short} {r['rsi_s']} / RSI{rsi_long} {r['rsi_l']}\n"
+            f"  停損 {r['stop']}  目標 {r['target']}  風報比 {rrr_str}"
+        )
+
+    sections = [header]
+    if buys:
+        sections.append(f"\n✅ 買進訊號（{len(buys)} 檔）")
+        for r in buys:
+            sections.append(fmt_stock(r))
+    if watch:
+        sections.append(f"\n👀 觀察中（{len(watch)} 檔）")
+        for r in watch:
+            sections.append(fmt_stock(r))
+    if not buys and not watch:
+        sections.append("\n本次掃描無符合條件股票。")
+    sections.append("\n⚠️ 僅供技術分析參考，非投資建議")
+
+    # 切分訊息（每則上限 4800 字元，留 buffer）
+    MAX_LEN = 4800
+    messages = []
+    current  = ""
+    for block in sections:
+        if len(current) + len(block) > MAX_LEN:
+            if current:
+                messages.append(current.strip())
+            current = block
+        else:
+            current += block
+    if current.strip():
+        messages.append(current.strip())
+
+    # LINE Messaging API 每次最多送 5 則
+    all_ok  = True
+    err_msg = ""
+    for chunk in [messages[i:i+5] for i in range(0, len(messages), 5)]:
+        payload = {
+            "to": user_id,
+            "messages": [{"type": "text", "text": m} for m in chunk],
+        }
+        try:
+            resp = requests.post(
+                "https://api.line.me/v2/bot/message/push",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type":  "application/json",
+                },
+                json=payload,
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                all_ok  = False
+                err_msg = resp.json().get("message", f"HTTP {resp.status_code}")
+        except Exception as e:
+            all_ok  = False
+            err_msg = str(e)
+
+    return all_ok, err_msg
 
 # ── 側邊欄：參數設定 ──────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ 參數設定")
-    bb_period  = st.number_input("BB 週期（天）",     min_value=5,   max_value=50,  value=20)
-    bb_std     = st.number_input("BB 標準差倍數",    min_value=1.0, max_value=3.0, value=2.0, step=0.1)
-    pct_b_thr  = st.number_input("%B 超賣門檻",      min_value=0.0, max_value=0.5, value=0.2, step=0.05)
-    grace      = st.number_input("寬容期（天）",      min_value=1,   max_value=14,  value=7)
-    rsi_short  = st.number_input("RSI 短天期",        min_value=3,   max_value=14,  value=6)
-    rsi_long   = st.number_input("RSI 長天期",        min_value=7,   max_value=30,  value=12)
+    bb_period = st.number_input("BB 週期（天）",  min_value=5,   max_value=50,  value=20)
+    bb_std    = st.number_input("BB 標準差倍數",  min_value=1.0, max_value=3.0, value=2.0, step=0.1)
+    pct_b_thr = st.number_input("%B 超賣門檻",    min_value=0.0, max_value=0.5, value=0.2, step=0.05)
+    grace     = st.number_input("寬容期（天）",    min_value=1,   max_value=14,  value=7)
+    rsi_short = st.number_input("RSI 短天期",      min_value=3,   max_value=14,  value=6)
+    rsi_long  = st.number_input("RSI 長天期",      min_value=7,   max_value=30,  value=12)
+
+    st.divider()
+
+    # ── LINE Messaging API 設定區 ─────────────────────────
+    st.header("🔔 LINE 推播設定")
+    st.caption(
+        "需先至 [LINE Developers](https://developers.line.biz/console/) "
+        "建立 Messaging API Channel 並取得 Token。"
+    )
+
+    line_token = st.text_input(
+        "Channel Access Token",
+        type="password",
+        placeholder="貼上 Channel Access Token",
+    )
+
+    line_user_id = st.text_input(
+        "你的 LINE User ID",
+        placeholder="U 開頭的 33 碼字串",
+        help="設定 Token 後點下方按鈕自動取得",
+    )
+
+    # 自動取得 User ID 按鈕
+    if line_token:
+        if st.button("🔍 自動取得我的 User ID", use_container_width=True):
+            uid = line_get_user_id(line_token)
+            if uid:
+                st.success(f"取得成功：`{uid}`")
+                st.info("請將上方 ID 複製貼到「你的 LINE User ID」欄位。")
+            else:
+                st.error(
+                    "找不到 User ID。\n\n"
+                    "請先用 LINE 對你的 Bot 傳任意一則訊息，再重試。"
+                )
+
+    if line_token and line_user_id:
+        st.success("✅ LINE 推播已就緒")
+    elif line_token:
+        st.warning("⚠️ 請填入 User ID")
+    else:
+        st.caption("未設定 Token，掃股結果不會推播。")
 
     st.divider()
     st.caption("策略邏輯")
@@ -225,18 +347,31 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
 
     for i, code in enumerate(codes):
         prog.progress((i + 1) / len(codes), text=f"掃描中... {code} ({i+1}/{len(codes)})")
-        closes, name = fetch_stock_data(code)   # ← 改這裡
+        closes, name = fetch_stock_data(code)
         if closes is None:
             errors.append(code)
         else:
-            r = analyze(code, closes, name, params)   # ← 傳入 name
+            r = analyze(code, closes, name, params)
             if r:
                 results.append(r)
 
     prog.empty()
+    results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
 
-    results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1,
-                                -(x["rrr"] or 0)))
+    # ── 自動 LINE 推播 ────────────────────────────────────
+    if line_token and line_user_id:
+        with st.spinner("📲 傳送 LINE 推播中..."):
+            ok, err = line_push_message(
+                line_token, line_user_id, results, rsi_short, rsi_long
+            )
+        if ok:
+            st.success("✅ LINE 推播已送出！")
+        else:
+            st.error(f"❌ LINE 推播失敗：{err}")
+    elif not line_token:
+        st.info("💡 在左側設定 LINE Token 即可自動推播結果。")
+    else:
+        st.warning("⚠️ 請在左側填入 LINE User ID 才能推播。")
 
     st.divider()
     col_l, col_r = st.columns(2)
@@ -271,21 +406,18 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
         for r in results:
             is_buy = r["signal"] == "BUY"
             badge  = "✅ 買進訊號" if is_buy else "👀 觀察中"
-
             with st.expander(f"{r['code']} {r['name']}　{badge}", expanded=is_buy):
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("現價",        f"{r['price']}")
-                c2.metric("%B",          f"{r['pct_b']}", delta="超賣" if r["pct_b"] < pct_b_thr else None)
+                c1.metric("現價",            f"{r['price']}")
+                c2.metric("%B",              f"{r['pct_b']}", delta="超賣" if r["pct_b"] < pct_b_thr else None)
                 c3.metric(f"RSI{rsi_short}", f"{r['rsi_s']}")
                 c4.metric(f"RSI{rsi_long}",  f"{r['rsi_l']}")
-
                 st.divider()
                 t1, t2, t3, t4 = st.columns(4)
                 t1.metric("📌 進場價", f"{r['price']}")
                 t2.metric("🛑 停損價", f"{r['stop']}")
                 t3.metric("🎯 目標價", f"{r['target']}")
                 t4.metric("⚖️ 風報比", f"1 : {r['rrr']}" if r["rrr"] else "N/A")
-
                 st.caption(
                     f"BB 軌道：下軌 {r['lower']} ／ 中軌 {r['middle']} ／ 上軌 {r['upper']}"
                 )
