@@ -5,10 +5,9 @@ import numpy as np
 import requests
 from datetime import datetime
 
-# ── 讀取 GitHub Secrets 環境變數 ─────────────────────────
-LINE_CHANNEL_ID = os.environ.get("2010319445")
-LINE_CHANNEL_SECRET = os.environ.get("213f23ddacfbb77afe9497b3ecb21828")
-LINE_USER_ID = os.environ.get("Ccb4de041367c8bfe97faa1330a98a206")
+LINE_CHANNEL_ID = os.environ.get("LINE_CHANNEL_ID")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+LINE_USER_ID = os.environ.get("LINE_USER_ID")
 
 # 固定排程參數
 PARAMS = {
