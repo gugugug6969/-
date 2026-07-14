@@ -317,83 +317,93 @@ raw = st.text_area(
 codes = [c.strip() for c in raw.replace("\n", ",").split(",") if c.strip()]
 st.caption(f"共 {len(codes)} 檔待掃描")
 
-# ── 掃描按鈕 ──────────────────────────────────────────────
-if st.button("🔍 開始掃股", type="primary", use_container_width=True):
-    results, errors = [], []
-    prog = st.progress(0, text="準備中...")
+# ── 掃描按鈕與防呆鎖定 ──────────────────────────────────────────────
+# 建立一個狀態來記錄是否正在掃描，避免重複點擊導致畫面崩潰 (removeChild 錯誤)
+if "is_scanning" not in st.session_state:
+    st.session_state.is_scanning = False
 
-    for i, code in enumerate(codes):
-        prog.progress((i + 1) / len(codes), text=f"掃描中... {code} ({i+1}/{len(codes)})")
-        closes, name = fetch_stock_data(code)
-        if closes is None:
-            errors.append(code)
-        else:
-            r = analyze(code, closes, name, params)
-            if r:
-                results.append(r)
+if st.button("🔍 開始掃股", type="primary", use_container_width=True, disabled=st.session_state.is_scanning):
+    st.session_state.is_scanning = True  # 鎖定狀態
+    
+    try:
+        results, errors = [], []
+        prog = st.progress(0, text="準備中...")
 
-    prog.empty()
-    results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
-
-    # ── 自動 LINE 推播 ────────────────────────────────────
-    if line_ready:
-        with st.spinner("📲 傳送 LINE 推播中..."):
-            token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
-            if token:
-                report = build_report_message(results, rsi_short, rsi_long, params)
-                ok, err = line_push(token, LINE_USER_ID, report)
-                if ok:
-                    st.success("✅ LINE 推播已送出！")
-                else:
-                    st.error(f"❌ 推播失敗：{err}")
+        for i, code in enumerate(codes):
+            prog.progress((i + 1) / len(codes), text=f"掃描中... {code} ({i+1}/{len(codes)})")
+            closes, name = fetch_stock_data(code)
+            if closes is None:
+                errors.append(code)
             else:
-                st.error("❌ Token 換取失敗，請確認 secrets.toml 內容。")
+                r = analyze(code, closes, name, params)
+                if r:
+                    results.append(r)
 
-    st.divider()
-    col_l, col_r = st.columns(2)
-    col_l.metric("✅ 符合條件", f"{len(results)} 檔")
-    col_r.metric("❌ 抓取失敗", f"{len(errors)} 檔")
+        # ⚠️ 解決崩潰關鍵：不要用 prog.empty() 把節點強制刪除，改成顯示 100% 完成即可
+        prog.progress(1.0, text="✅ 掃描完成！")
+        
+        results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
 
-    if errors:
-        st.warning(f"以下代號抓取失敗：{', '.join(errors)}")
+        # ── 自動 LINE 推播 ────────────────────────────────────
+        if line_ready:
+            with st.spinner("📲 傳送 LINE 推播中..."):
+                token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
+                if token:
+                    report = build_report_message(results, rsi_short, rsi_long, params)
+                    ok, err = line_push(token, LINE_USER_ID, report)
+                    if ok:
+                        st.success("✅ LINE 推播已送出！")
+                    else:
+                        st.error(f"❌ 推播失敗：{err}")
+                else:
+                    st.error("❌ Token 換取失敗，請確認 secrets.toml 內容。")
 
-    if not results:
-        st.info("目前沒有股票符合條件，可嘗試放寬參數或等待更好時機。")
-    else:
-        df = pd.DataFrame(results)
-        df_display = df[["code","name","signal","price","pct_b",
-                          "rsi_s","rsi_l","stop","target","rrr"]].copy()
-        df_display.columns = ["代號","名稱","訊號","現價","%B",
-                               f"RSI{rsi_short}",f"RSI{rsi_long}","停損","目標","風報比"]
+        st.divider()
+        col_l, col_r = st.columns(2)
+        col_l.metric("✅ 符合條件", f"{len(results)} 檔")
+        col_r.metric("❌ 抓取失敗", f"{len(errors)} 檔")
 
-        def color_signal(val):
-            if val == "BUY":   return "background-color:#1a4a2e; color:#00e5a0; font-weight:bold"
-            if val == "WATCH": return "background-color:#3a3000; color:#ffd166; font-weight:bold"
-            return ""
+        if errors:
+            st.warning(f"以下代號抓取失敗：{', '.join(errors)}")
 
-        st.dataframe(
-            df_display.style.map(color_signal, subset=["訊號"]),
-            use_container_width=True, hide_index=True,
-        )
+        if not results:
+            st.info("目前沒有股票符合條件，可嘗試放寬參數或等待更好時機。")
+        else:
+            df = pd.DataFrame(results)
+            df_display = df[["code","name","signal","price","pct_b",
+                              "rsi_s","rsi_l","stop","target","rrr"]].copy()
+            df_display.columns = ["代號","名稱","訊號","現價","%B",
+                                   f"RSI{rsi_short}",f"RSI{rsi_long}","停損","目標","風報比"]
 
-        st.subheader("個股詳細資訊")
-        for r in results:
-            is_buy = r["signal"] == "BUY"
-            badge  = "✅ 買進訊號" if is_buy else "👀 觀察中"
-            with st.expander(f"{r['code']} {r['name']}　{badge}", expanded=is_buy):
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("現價",            f"{r['price']}")
-                c2.metric("%B",              f"{r['pct_b']}", delta="超賣" if r["pct_b"] < pct_b_thr else None)
-                c3.metric(f"RSI{rsi_short}", f"{r['rsi_s']}")
-                c4.metric(f"RSI{rsi_long}",  f"{r['rsi_l']}")
-                st.divider()
-                t1, t2, t3, t4 = st.columns(4)
-                t1.metric("📌 進場價", f"{r['price']}")
-                t2.metric("🛑 停損價", f"{r['stop']}")
-                t3.metric("🎯 目標價", f"{r['target']}")
-                t4.metric("⚖️ 風報比", f"1 : {r['rrr']}" if r["rrr"] else "N/A")
-                st.caption(f"BB 軌道：下軌 {r['lower']} ／ 中軌 {r['middle']} ／ 上軌 {r['upper']}")
+            def color_signal(val):
+                if val == "BUY":   return "background-color:#1a4a2e; color:#00e5a0; font-weight:bold"
+                if val == "WATCH": return "background-color:#3a3000; color:#ffd166; font-weight:bold"
+                return ""
 
-# ── 免責聲明 ──────────────────────────────────────────────
-st.divider()
+            st.dataframe(
+                df_display.style.map(color_signal, subset=["訊號"]),
+                use_container_width=True, hide_index=True,
+            )
+
+            st.subheader("個股詳細資訊")
+            for r in results:
+                is_buy = r["signal"] == "BUY"
+                badge  = "✅ 買進訊號" if is_buy else "👀 觀察中"
+                with st.expander(f"{r['code']} {r['name']} {badge}", expanded=is_buy):
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("現價",             f"{r['price']}")
+                    c2.metric("%B",              f"{r['pct_b']}", delta="超賣" if r["pct_b"] < pct_b_thr else None)
+                    c3.metric(f"RSI{rsi_short}", f"{r['rsi_s']}")
+                    c4.metric(f"RSI{rsi_long}",  f"{r['rsi_l']}")
+                    st.divider()
+                    t1, t2, t3, t4 = st.columns(4)
+                    t1.metric("📌 進場價", f"{r['price']}")
+                    t2.metric("🛑 停損價", f"{r['stop']}")
+                    t3.metric("🎯 目標價", f"{r['target']}")
+                    t4.metric("⚖️ 風報比", f"1 : {r['rrr']}" if r["rrr"] else "N/A")
+                    st.caption(f"BB 軌道：下軌 {r['lower']} ／ 中軌 {r['middle']} ／ 上軌 {r['upper']}")
+                    
+    finally:
+        # 無論程式成功或報錯，最後一定會把按鈕解鎖
+        st.session_state.is_scanning = False
 st.caption("⚠️ 本工具僅供技術分析參考，不構成投資建議。投資有風險，請自行評估後再做決策。")
