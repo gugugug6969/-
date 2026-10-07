@@ -135,7 +135,7 @@ def build_report_message(results, rsi_short, rsi_long, params):
     if buys and watch: body += "━" * 30 + "\n"
     body += section("觀察中", "👀", watch)
     if not buys and not watch: body = "本次掃描無符合條件股票。\n"
-    return header + body + f"\n{'━'*30}\n⚠️ 自動排程執行測試"
+    return header + body + f"\n{'━'*30}\n⚠️ 自動排程執行"
 
 def line_push(token, user_id, text):
     try:
@@ -163,13 +163,6 @@ if __name__ == "__main__":
         except Exception: continue
 
     results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
-    
-    # ── ⚠️ 強制加入測試連線資料 ──────────────────────────────
-    results.append({
-        "code": "0000", "name": "測試連線", "signal": "BUY",
-        "price": 100.0, "pct_b": 0.1, "rsi_s": 20.0, "rsi_l": 25.0,
-        "stop": 95.0, "target": 110.0, "rrr": 2.0,
-    })
     
     token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
     if token:
