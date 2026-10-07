@@ -7,27 +7,39 @@ from datetime import datetime
 
 # ── 頁面設定 ──────────────────────────────────────────────
 st.set_page_config(
-    page_title="台股選股系統",
+    page_title="台股 BB × RSI 掃描器",
     page_icon="📈",
     layout="wide",
 )
 
-st.title("📈 台股選股系統")
-st.caption("BBand + RSI 雙指標策略 · 收盤後掃股 · 資料來源：Yahoo Finance (yfinance)")
-
-# ── 從 secrets.toml 讀取 LINE 設定 ───────────────────────
-def load_line_secrets():
-    """讀取 .streamlit/secrets.toml 裡的 [line] 區塊，缺少時回傳 None"""
-    try:
-        return (
-            st.secrets["line"]["channel_id"],
-            st.secrets["line"]["channel_secret"],
-            st.secrets["line"]["user_id"],
-        )
-    except Exception:
-        return None, None, None
-
-LINE_CHANNEL_ID, LINE_CHANNEL_SECRET, LINE_USER_ID = load_line_secrets()
+st.markdown("""
+<style>
+.block-container {padding-top: 1.4rem; padding-bottom: 3rem; max-width: 1280px;}
+.hero {
+    padding: 1.35rem 1.5rem;
+    border: 1px solid rgba(128,128,128,.22);
+    border-radius: 18px;
+    margin-bottom: 1rem;
+    background: linear-gradient(135deg, rgba(25,118,210,.09), rgba(76,175,80,.06));
+}
+.hero h1 {margin: 0 0 .35rem 0; font-size: 2rem;}
+.hero p {margin: 0; opacity: .76; font-size: .95rem;}
+.notice {
+    padding: .8rem 1rem;
+    border-radius: 12px;
+    border: 1px solid rgba(76,175,80,.28);
+    background: rgba(76,175,80,.06);
+    margin-bottom: 1rem;
+}
+</style>
+<div class="hero">
+  <h1>📈 台股 BB × RSI 掃描器</h1>
+  <p>BBand + RSI 雙指標策略｜網頁即時掃描｜Yahoo Finance 資料</p>
+</div>
+<div class="notice">
+  🔔 <b>LINE 通知採自動排程</b>：週一～週五 15:05 由 GitHub Actions 執行。網頁按「開始掃股」只顯示結果，不會傳送 LINE。
+</div>
+""", unsafe_allow_html=True)
 
 # ── 股票名稱對照表 ────────────────────────────────────────
 STOCK_NAMES = {
@@ -167,94 +179,6 @@ def analyze(code, closes, name, params):
         "target": round(upper[-1],   2), "rrr":    rrr,
     }
 
-# ── LINE Messaging API ────────────────────────────────────
-def get_channel_access_token(channel_id, channel_secret):
-    try:
-        resp = requests.post(
-            "https://api.line.me/v2/oauth/accessToken",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={"grant_type": "client_credentials",
-                  "client_id": channel_id, "client_secret": channel_secret},
-            timeout=10,
-        )
-        return resp.json().get("access_token") if resp.status_code == 200 else None
-    except Exception:
-        return None
-
-def build_report_message(results, rsi_short, rsi_long, params):
-    now   = datetime.now().strftime("%Y/%m/%d %H:%M")
-    buys  = [r for r in results if r["signal"] == "BUY"]
-    watch = [r for r in results if r["signal"] == "WATCH"]
-
-    header = (
-        f"📈 台股掃描報表｜{now}\n"
-        f"參數：BB{params['bb_period']}期/{params['bb_std']}σ  "
-        f"%B<{params['pct_b']}  RSI{rsi_short}/{rsi_long}\n"
-        f"{'━'*30}\n"
-    )
-
-    def section(title, emoji, rows):
-        if not rows:
-            return ""
-        lines = [f"{emoji} {title}（{len(rows)} 檔）\n"]
-        lines.append(f"{'代號+名稱':<10} {'現價':>6} {'%B':>5} "
-                     f"{'RS短':>5} {'RS長':>5} {'風報比':>6}")
-        lines.append("─" * 42)
-        for r in rows:
-            rrr = f"1:{r['rrr']}" if r["rrr"] else " N/A"
-            name_short = r['name'][:4]
-            label = f"{r['code']}{name_short}"
-            lines.append(
-                f"{label:<10} {r['price']:>6} {r['pct_b']:>5.2f} "
-                f"{r['rsi_s']:>5.1f} {r['rsi_l']:>5.1f} {rrr:>6}"
-            )
-        lines.append("")
-        lines.append("  進場 / 停損 / 目標")
-        for r in rows:
-            lines.append(f"  {r['code']} {r['name'][:4]}：{r['price']} / {r['stop']} / {r['target']}")
-        return "\n".join(lines)
-
-    body = ""
-    body += section("買進訊號", "✅", buys)
-    if buys and watch:
-        body += "\n" + "━" * 30 + "\n"
-    body += section("觀察中", "👀", watch)
-
-    if not buys and not watch:
-        body = "本次掃描無符合條件股票。\n"
-
-    footer = f"\n{'━'*30}\n⚠️ 僅供技術分析參考，非投資建議"
-    return header + body + footer
-
-def line_push(token, user_id, text):
-    MAX = 4800
-    chunks = []
-    while len(text) > MAX:
-        cut = text.rfind("\n", 0, MAX)
-        cut = cut if cut > 0 else MAX
-        chunks.append(text[:cut].strip())
-        text = text[cut:].strip()
-    if text:
-        chunks.append(text)
-
-    all_ok, err_msg = True, ""
-    for batch in [chunks[i:i+5] for i in range(0, len(chunks), 5)]:
-        try:
-            resp = requests.post(
-                "https://api.line.me/v2/bot/message/push",
-                headers={"Authorization": f"Bearer {token}",
-                         "Content-Type": "application/json"},
-                json={"to": user_id,
-                      "messages": [{"type": "text", "text": m} for m in batch]},
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                all_ok  = False
-                err_msg = resp.json().get("message", f"HTTP {resp.status_code}")
-        except Exception as e:
-            all_ok, err_msg = False, str(e)
-    return all_ok, err_msg
-
 # ── 側邊欄：策略參數 ──────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ 策略參數")
@@ -267,20 +191,9 @@ with st.sidebar:
 
     st.divider()
 
-    st.header("🔔 LINE 推播")
-    line_ready = bool(LINE_CHANNEL_ID and LINE_CHANNEL_SECRET and LINE_USER_ID)
-    if line_ready:
-        st.success("✅ 已設定（secrets.toml）")
-    else:
-        st.warning("⚠️ 未設定\n\n請編輯 `.streamlit/secrets.toml`")
-        with st.expander("查看設定格式"):
-            st.code("""
-# .streamlit/secrets.toml
-[line]
-channel_id     = "你的 Channel ID"
-channel_secret = "你的 Channel Secret"
-user_id        = "U 開頭的 User ID"
-""", language="toml")
+    st.header("🔔 LINE 自動通知")
+    st.success("週一～週五 15:05 自動掃描")
+    st.caption("LINE 由 GitHub Actions + auto_scan.py 獨立執行。網頁操作不會觸發任何 LINE 訊息。")
 
     st.divider()
     st.caption("策略邏輯")
@@ -324,20 +237,6 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
                     results.append(r)
 
     results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
-
-    # ── 自動 LINE 推播 ────────────────────────────────────
-    if line_ready:
-        with st.spinner("📲 傳送 LINE 推播中..."):
-            token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
-            if token:
-                report = build_report_message(results, rsi_short, rsi_long, params)
-                ok, err = line_push(token, LINE_USER_ID, report)
-                if ok:
-                    st.success("✅ LINE 推播已送出！")
-                else:
-                    st.error(f"❌ 推播失敗：{err}")
-            else:
-                st.error("❌ Token 換取失敗，請確認 secrets.toml 內容。")
 
     st.divider()
     col_l, col_r = st.columns(2)
@@ -386,4 +285,4 @@ if st.button("🔍 開始掃股", type="primary", use_container_width=True):
 
 # ── 免責聲明 ──────────────────────────────────────────────
 st.divider()
-st.caption("⚠️ 本工具僅供技術分析參考，不構成投資建議。投資有風險，請自行評估後再做決策。")
+st.caption("⚠️ 本工具僅供技術分析參考，不構成投資建議。LINE 僅由排程腳本自動發送，網頁操作不會觸發通知。")
