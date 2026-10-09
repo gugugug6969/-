@@ -1,9 +1,10 @@
 import os
+import json
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 LINE_CHANNEL_ID = os.environ.get("LINE_CHANNEL_ID")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
@@ -130,12 +131,15 @@ def get_channel_access_token(channel_id, channel_secret):
         return resp.json().get("access_token") if resp.status_code == 200 else None
     except Exception: return None
 
-def build_report_message(results, rsi_short, rsi_long, params):
-    now = datetime.now().strftime("%Y/%m/%d %H:%M")
+def build_report_message(results, rsi_short, rsi_long, params, scan_summary=None):
+    now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d %H:%M")
     buys = [r for r in results if r["signal"] == "BUY"]
     watch = [r for r in results if r["signal"] == "WATCH"]
     header = f"📈 台股自動掃描報表｜{now}\n參數：BB{params['bb_period']}/{params['bb_std']}σ %B<{params['pct_b']} RSI{rsi_short}/{rsi_long}\n{'━'*30}\n"
     
+    if scan_summary:
+        header += f"資料交易日：{scan_summary['data_date']}\n資料成功：{scan_summary['successful']}/{scan_summary['total']} 檔；未取得可分析資料：{scan_summary['total'] - scan_summary['successful']} 檔\n"
+
     def section(title, emoji, rows):
         if not rows: return ""
         lines = [f"{emoji} {title}（{len(rows)} 檔）\n", f"{'代號+名稱':<10} {'現價':>6} {'%B':>5} {'RS短':>5} {'RS長':>5} {'風報比':>6}", "─" * 42]
@@ -150,7 +154,7 @@ def build_report_message(results, rsi_short, rsi_long, params):
     if buys and watch: body += "━" * 30 + "\n"
     body += section("觀察中", "👀", watch)
     if not buys and not watch: body = "本次掃描無符合條件股票。\n"
-    return header + body + f"\n{'━'*30}\n⚠️ 自動排程執行測試"
+    return header + body + f"\n{'━'*30}\nBB／RSI 策略篩選結果"
 
 def line_push(token, user_id, text):
     try:
@@ -191,35 +195,42 @@ if __name__ == "__main__":
         if not token:
             print("錯誤：無法換取 LINE Access Token。")
             exit(1)
-        from datetime import timezone, timedelta
         tested_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d %H:%M:%S")
         message = f"✅ 台股掃描器｜LINE 推播測試\n兩群通知連線測試。\n測試時間：{tested_at}"
         exit(0 if push_report(token, targets, message) else 1)
 
     results = []
+    successful = 0
+    data_dates = set()
     for code in CODES:
         try:
             ticker = yf.Ticker(code + ".TW")
             df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
             if df.empty or len(df) < 30: continue
-            closes = df["Close"].dropna().to_numpy()
+            close_series = df["Close"].dropna()
+            closes = close_series.to_numpy()
+            if len(closes) < max(PARAMS["bb_period"], PARAMS["rsi_long"]) + PARAMS["grace"] + 5: continue
             name = STOCK_NAMES.get(code, code)
             r = analyze(code, closes, name, PARAMS)
+            data_dates.add(close_series.index[-1].strftime("%Y/%m/%d"))
+            successful += 1
             if r: results.append(r)
         except Exception: continue
 
     results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
     
-    # ── ⚠️ 強制加入測試連線資料 ──────────────────────────────
-    results.append({
-        "code": "0000", "name": "測試連線", "signal": "BUY",
-        "price": 100.0, "pct_b": 0.1, "rsi_s": 20.0, "rsi_l": 25.0,
-        "stop": 95.0, "target": 110.0, "rrr": 2.0,
-    })
-    
+    if not successful:
+        print("錯誤：本次未取得任何可分析股票資料；不會發送空白篩選結果。")
+        exit(1)
+    ordered_dates = sorted(data_dates)
+    date_label = ordered_dates[0] if len(ordered_dates) == 1 else f"{ordered_dates[0]}～{ordered_dates[-1]}"
+    scan_summary = {"successful": successful, "total": len(CODES), "data_date": date_label}
+    print("掃描摘要：" + json.dumps(scan_summary, ensure_ascii=False))
+    print("掃描結果：" + json.dumps(results, ensure_ascii=False, default=float))
+
     token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
     if token:
-        report = build_report_message(results, PARAMS["rsi_short"], PARAMS["rsi_long"], PARAMS)
+        report = build_report_message(results, PARAMS["rsi_short"], PARAMS["rsi_long"], PARAMS, scan_summary)
         if not push_report(token, targets, report):
             exit(1)
     else:
