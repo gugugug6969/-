@@ -8,24 +8,21 @@ from datetime import datetime
 LINE_CHANNEL_ID = os.environ.get("LINE_CHANNEL_ID")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
-LINE_GROUP_ID_1 = os.environ.get("LINE_GROUP_ID_1", "")
 LINE_GROUP_ID_2 = os.environ.get("LINE_GROUP_ID_2", "")
 
-def get_line_targets(group_id_1, group_id_2, legacy_target):
-    """兩群設定優先；兩個都未設定時沿用原本收件對象。"""
-    groups = [(group_id_1 or "").strip(), (group_id_2 or "").strip()]
-    if any(groups):
-        if not all(groups):
-            raise ValueError("請同時設定 LINE_GROUP_ID_1 與 LINE_GROUP_ID_2。")
-        if groups[0] == groups[1]:
-            raise ValueError("兩個群組 ID 必須不同。")
-        if any(not target.startswith("C") or any(c.isspace() for c in target) for target in groups):
-            raise ValueError("請填入 Webhook 取得的群組 groupId（C 開頭），不是群組名稱或邀請網址。")
-        return groups
-    target = (legacy_target or "").strip()
-    if not target:
-        raise ValueError("請設定兩個群組 ID，或保留原本 LINE_USER_ID。")
-    return [target]
+def get_line_targets(legacy_target, group_id_2):
+    """保留原本收件對象；只需另設第二群的 ID。"""
+    first = (legacy_target or "").strip()
+    second = (group_id_2 or "").strip()
+    if not first:
+        raise ValueError("請保留原本 LINE_USER_ID 設定，作為第一個收件對象。")
+    if not second:
+        return [first]
+    if not second.startswith("C") or any(c.isspace() for c in second):
+        raise ValueError("LINE_GROUP_ID_2 請填 Webhook 取得的群組 groupId（C 開頭）。")
+    if first == second:
+        raise ValueError("第二群的 ID 不可與原本收件對象相同。")
+    return [first, second]
 
 # 固定排程參數
 PARAMS = {
@@ -181,7 +178,7 @@ if __name__ == "__main__":
         print("錯誤：缺少 LINE 憑證環境變數。")
         exit(1)
     try:
-        targets = get_line_targets(LINE_GROUP_ID_1, LINE_GROUP_ID_2, LINE_USER_ID)
+        targets = get_line_targets(LINE_USER_ID, LINE_GROUP_ID_2)
     except ValueError as error:
         print(f"錯誤：{error}")
         exit(1)
