@@ -1,12 +1,21 @@
 name: Daily Stock Scan
 
 on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/daily_scan.yml']
   schedule:
     # 每天 07:05 UTC 執行（對應台灣時間 15:05）
     # 故意避開整點 15:00 以免排隊塞車
     # 1-5 代表週一到週五執行，六日不執行
     - cron: '5 7 * * 1-5'
-  workflow_dispatch: # 允許手動觸發按鈕，方便隨時測試
+  workflow_dispatch:
+    inputs:
+      test_only:
+        description: "只發送 LINE 連線測試訊息"
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   run-scanner:
@@ -29,4 +38,5 @@ jobs:
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           LINE_GROUP_ID_2: ${{ secrets.LINE_GROUP_ID_2 }}
+          LINE_TEST_ONLY: ${{ (github.event_name == 'push' || inputs.test_only) && '1' || '0' }}
         run: python auto_scan.py
