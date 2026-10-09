@@ -183,6 +183,19 @@ if __name__ == "__main__":
         print(f"錯誤：{error}")
         exit(1)
         
+    if os.environ.get("LINE_TEST_ONLY") == "1":
+        if len(targets) != 2:
+            print("錯誤：第二群 LINE_GROUP_ID_2 尚未設定；此次測試不會發送。")
+            exit(1)
+        token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
+        if not token:
+            print("錯誤：無法換取 LINE Access Token。")
+            exit(1)
+        from datetime import timezone, timedelta
+        tested_at = datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d %H:%M:%S")
+        message = f"✅ 台股掃描器｜LINE 推播測試\n兩群通知連線測試。\n測試時間：{tested_at}"
+        exit(0 if push_report(token, targets, message) else 1)
+
     results = []
     for code in CODES:
         try:
