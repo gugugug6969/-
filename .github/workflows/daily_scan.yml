@@ -1,9 +1,6 @@
 name: Daily Stock Scan
 
 on:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/daily_scan.yml']
   schedule:
     # 每天 07:05 UTC 執行（對應台灣時間 15:05）
     # 故意避開整點 15:00 以免排隊塞車
