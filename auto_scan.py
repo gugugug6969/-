@@ -8,6 +8,24 @@ from datetime import datetime
 LINE_CHANNEL_ID = os.environ.get("LINE_CHANNEL_ID")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 LINE_USER_ID = os.environ.get("LINE_USER_ID")
+LINE_GROUP_ID_1 = os.environ.get("LINE_GROUP_ID_1", "")
+LINE_GROUP_ID_2 = os.environ.get("LINE_GROUP_ID_2", "")
+
+def get_line_targets(group_id_1, group_id_2, legacy_target):
+    """兩群設定優先；兩個都未設定時沿用原本收件對象。"""
+    groups = [(group_id_1 or "").strip(), (group_id_2 or "").strip()]
+    if any(groups):
+        if not all(groups):
+            raise ValueError("請同時設定 LINE_GROUP_ID_1 與 LINE_GROUP_ID_2。")
+        if groups[0] == groups[1]:
+            raise ValueError("兩個群組 ID 必須不同。")
+        if any(not target.startswith("C") or any(c.isspace() for c in target) for target in groups):
+            raise ValueError("請填入 Webhook 取得的群組 groupId（C 開頭），不是群組名稱或邀請網址。")
+        return groups
+    target = (legacy_target or "").strip()
+    if not target:
+        raise ValueError("請設定兩個群組 ID，或保留原本 LINE_USER_ID。")
+    return [target]
 
 # 固定排程參數
 PARAMS = {
@@ -142,12 +160,30 @@ def line_push(token, user_id, text):
         resp = requests.post("https://api.line.me/v2/bot/message/push",
                       headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                       json={"to": user_id, "messages": [{"type": "text", "text": text[:4800]}]}, timeout=10)
-        print(f"LINE 回應狀態碼: {resp.status_code}, 內容: {resp.text}")
-    except Exception as e: print(f"Push error: {e}")
+        print(f"LINE 回應狀態碼: {resp.status_code}")
+        return resp.status_code == 200
+    except requests.RequestException:
+        print("LINE 推播連線失敗。")
+        return False
+
+def push_report(token, targets, report):
+    """逐群送出；其中一群失敗仍繼續另一群。"""
+    succeeded = 0
+    for index, target in enumerate(targets, 1):
+        print(f"正在推播第 {index}/{len(targets)} 個收件對象。")
+        if line_push(token, target, report):
+            succeeded += 1
+    print(f"推播完成：{succeeded}/{len(targets)} 個收件對象成功。")
+    return succeeded == len(targets)
 
 if __name__ == "__main__":
-    if not all([LINE_CHANNEL_ID, LINE_CHANNEL_SECRET, LINE_USER_ID]):
+    if not all([LINE_CHANNEL_ID, LINE_CHANNEL_SECRET]):
         print("錯誤：缺少 LINE 憑證環境變數。")
+        exit(1)
+    try:
+        targets = get_line_targets(LINE_GROUP_ID_1, LINE_GROUP_ID_2, LINE_USER_ID)
+    except ValueError as error:
+        print(f"錯誤：{error}")
         exit(1)
         
     results = []
@@ -174,7 +210,8 @@ if __name__ == "__main__":
     token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
     if token:
         report = build_report_message(results, PARAMS["rsi_short"], PARAMS["rsi_long"], PARAMS)
-        line_push(token, LINE_USER_ID, report)
-        print("推播程序執行完畢。")
+        if not push_report(token, targets, report):
+            exit(1)
     else:
         print("錯誤：無法換取 LINE Access Token。請檢查 Channel ID 與 Secret。")
+        exit(1)
