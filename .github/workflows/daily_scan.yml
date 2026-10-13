@@ -1,38 +1,36 @@
-name: Finalize verified LINE Reply endpoint
+name: Daily Stock Scan
+
 on:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/daily_scan.yml']
-permissions:
-  contents: read
+  # Free Reply API mode: group members send 掃描 to request a report.
+  # Scheduled push is disabled to avoid paid message consumption.
+  workflow_dispatch:
+    inputs:
+      test_only:
+        description: "只發送 LINE 連線測試訊息"
+        type: boolean
+        required: false
+        default: false
+
 jobs:
-  configure:
+  run-scanner:
     runs-on: ubuntu-latest
     steps:
-      - name: Apply endpoint previously verified with LINE and read back state
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Script
         env:
           LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           LINE_GROUP_ID_2: ${{ secrets.LINE_GROUP_ID_2 }}
-        run: |
-          python - <<'PY'
-          import os,json,urllib.request,urllib.parse
-          endpoint='https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/webhook'
-          data=urllib.parse.urlencode({'grant_type':'client_credentials','client_id':os.environ['LINE_CHANNEL_ID'],'client_secret':os.environ['LINE_CHANNEL_SECRET']}).encode()
-          a=json.load(urllib.request.urlopen(urllib.request.Request('https://api.line.me/v2/oauth/accessToken',data=data),timeout=20))
-          headers={'Authorization':'Bearer '+a['access_token'],'Content-Type':'application/json'}
-          def call(path,method='GET',body=None):
-              req=urllib.request.Request('https://api.line.me'+path,headers=headers,method=method,data=json.dumps(body).encode() if body is not None else None)
-              with urllib.request.urlopen(req,timeout=20) as r:return json.load(r)
-          info=call('/v2/bot/channel/webhook/endpoint')
-          print('Previous endpoint matched:',info.get('endpoint')==endpoint,'active:',info.get('active'))
-          if info.get('endpoint')!=endpoint:call('/v2/bot/channel/webhook/endpoint','PUT',{'endpoint':endpoint})
-          info=call('/v2/bot/channel/webhook/endpoint')
-          print('Webhook configuration:',json.dumps(info))
-          if info.get('endpoint')!=endpoint:raise SystemExit('Endpoint verification failed')
-          for i,key in enumerate(['LINE_USER_ID','LINE_GROUP_ID_2'],1):
-              count=call('/v2/bot/group/'+os.environ[key]+'/members/count')
-              print('Group',i,'members:',count.get('count'))
-          print('Webhook test:',json.dumps(call('/v2/bot/channel/webhook/test','POST',{})))
-          PY
+          LINE_TEST_ONLY: ${{ inputs.test_only && '1' || '0' }}
+        run: python auto_scan.py
