@@ -1,36 +1,38 @@
-name: Daily Stock Scan
-
+name: Diagnose LINE webhook connectivity
 on:
-  # Free Reply API mode: group members send 掃描 to request a report.
-  # Scheduled push is disabled to avoid paid message consumption.
-  workflow_dispatch:
-    inputs:
-      test_only:
-        description: "只發送 LINE 連線測試訊息"
-        type: boolean
-        required: false
-        default: false
-
+  push:
+    branches: [main]
+    paths: ['.github/workflows/daily_scan.yml']
+permissions:
+  contents: read
 jobs:
-  run-scanner:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run Script
+      - name: Check DNS, signed empty request, and LINE webhook status
         env:
           LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          LINE_GROUP_ID_2: ${{ secrets.LINE_GROUP_ID_2 }}
-          LINE_TEST_ONLY: ${{ inputs.test_only && '1' || '0' }}
-        run: python auto_scan.py
+        run: |
+          python - <<'PY'
+          import os,json,urllib.request,urllib.error,urllib.parse,socket,time,hmac,hashlib,base64
+          host='quant-lab-line-reply.nuttybirch8.chatgpt.site'
+          print('DNS:',sorted(set(x[4][0] for x in socket.getaddrinfo(host,443))))
+          url='https://'+host+'/api/line/webhook'
+          body=b'{"events":[]}'
+          signature=base64.b64encode(hmac.new(os.environ['LINE_CHANNEL_SECRET'].encode(),body,hashlib.sha256).digest()).decode()
+          for signed in [False,True]:
+              start=time.monotonic()
+              headers={'Content-Type':'application/json'}
+              if signed:headers['x-line-signature']=signature
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url,data=body,headers=headers),timeout=15) as r:print('Direct request:',signed,r.status,round(time.monotonic()-start,2),r.read(120).decode(errors='replace'))
+              except urllib.error.HTTPError as e:print('Direct HTTP error:',signed,e.code,round(time.monotonic()-start,2),e.read(120).decode(errors='replace'))
+              except Exception as e:print('Direct network error:',signed,type(e).__name__,round(time.monotonic()-start,2),str(e))
+          data=urllib.parse.urlencode({'grant_type':'client_credentials','client_id':os.environ['LINE_CHANNEL_ID'],'client_secret':os.environ['LINE_CHANNEL_SECRET']}).encode()
+          a=json.load(urllib.request.urlopen(urllib.request.Request('https://api.line.me/v2/oauth/accessToken',data=data),timeout=20))
+          headers={'Authorization':'Bearer '+a['access_token'],'Content-Type':'application/json'}
+          for path,body in [('/v2/bot/channel/webhook/endpoint',None),('/v2/bot/channel/webhook/test',{})]:
+              req=urllib.request.Request('https://api.line.me'+path,headers=headers,data=json.dumps(body).encode() if body is not None else None)
+              with urllib.request.urlopen(req,timeout=20) as r:print(path,json.dumps(json.load(r)))
+          PY
