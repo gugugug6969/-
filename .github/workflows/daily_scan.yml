@@ -37,6 +37,20 @@ jobs:
           if(catalog.length<1800||new Set(catalog.map(r=>r.code)).size!==catalog.length)throw new Error('Official catalog inconsistent');
           writeFileSync('catalog.json',JSON.stringify(catalog));console.log('Official full-market universe:',catalog.length);
           JS
+      - name: Load signed prior report to continue missing stocks first
+        env:
+          LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
+        run: |
+          node --input-type=module <<'JS'
+          import {writeFileSync} from 'node:fs';
+          import {createHmac} from 'node:crypto';
+          const body=JSON.stringify({operation:'export_state',timestamp:Date.now()});
+          const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(body).digest('base64');
+          const r=await fetch('https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body,signal:AbortSignal.timeout(30000)});
+          if(!r.ok)throw new Error('Prior report HTTP '+r.status);
+          const data=await r.json();if(data.report)writeFileSync('previous-report.json',JSON.stringify(data.report));
+          console.log('Prior saved stock details:',data.report?.snapshots?.length??0);
+          JS
       - name: Scan and export report without LINE messages
         env:
           LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
@@ -46,6 +60,7 @@ jobs:
           LINE_EXPORT_ONLY: '1'
           LINE_REPORT_PATH: report.json
           LINE_UNIVERSE_PATH: catalog.json
+          LINE_PREVIOUS_REPORT_PATH: previous-report.json
         run: python auto_scan.py
       - name: Preserve completed market report
         uses: actions/upload-artifact@v4
