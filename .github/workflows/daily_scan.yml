@@ -1,11 +1,8 @@
 name: Daily Stock Scan
 
 on:
-  schedule:
-    # 每天 07:05 UTC 執行（對應台灣時間 15:05）
-    # 故意避開整點 15:00 以免排隊塞車
-    # 1,2,3,4,5 代表週一到週五執行，六日不執行
-    - cron: '5 7 * * 1,2,3,4,5'
+  # Free Reply API mode: group members send 掃描 to request a report.
+  # Scheduled push is disabled to avoid paid message consumption.
   workflow_dispatch:
     inputs:
       test_only:
