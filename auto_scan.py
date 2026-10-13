@@ -263,6 +263,15 @@ if __name__ == "__main__":
     print("掃描摘要：" + json.dumps(scan_summary, ensure_ascii=False))
     print("掃描結果：" + json.dumps(results, ensure_ascii=False, default=float))
 
+    if os.environ.get("LINE_EXPORT_ONLY") == "1":
+        payload = {"results": results, "successful": successful, "total": len(CODES),
+                   "dataDates": ordered_dates,
+                   "generatedAt": int(datetime.now(timezone.utc).timestamp() * 1000)}
+        with open(os.environ.get("LINE_REPORT_PATH", "report.json"), "w", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, allow_nan=False)
+        print("已儲存掃描報表；此模式不呼叫 LINE 推播或回覆 API。")
+        exit(0)
+
     token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
     if token:
         report = build_report_message(results, PARAMS["rsi_short"], PARAMS["rsi_long"], PARAMS, scan_summary)
