@@ -1,6 +1,9 @@
 name: Daily Stock Report Cache
 
 on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/daily_scan.yml']
   schedule:
     # Weekdays 15:05 Asia/Taipei; GitHub may delay scheduled jobs.
     - cron: '5 7 * * 1,2,3,4,5'
@@ -10,8 +13,9 @@ permissions:
   contents: read
 
 jobs:
-  refresh-report:
+  scan-market:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -21,6 +25,21 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Load official TWSE and TPEX listed company catalog
+        run: |
+          node --input-type=module <<'JS'
+          import {writeFileSync} from 'node:fs';
+          const catalog=[];
+          for(const [market,url] of [['TW','https://openapi.twse.com.tw/v1/opendata/t187ap03_L'],['TWO','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O']]){
+            const response=await fetch(url,{signal:AbortSignal.timeout(60000)});if(!response.ok)throw new Error('Official catalog HTTP '+response.status);
+            const rows=await response.json();if(!Array.isArray(rows)||rows.length<(market==='TW'?900:700))throw new Error('Official catalog incomplete');
+            for(const row of rows){const code=String(row['公司代號']??row.SecuritiesCompanyCode??'').trim(),name=String(row['公司簡稱']??row.CompanyAbbreviation??'').trim(),full=String(row['公司名稱']??row.CompanyName??'').trim();
+              if(/^\d{4,6}$/.test(code)&&name){const aliases=[...new Set([full,full.replace(/股份有限公司$/u,'')].filter(v=>v&&v!==name&&v.length<=80))];catalog.push({code,name,market,aliases});}
+            }
+          }
+          if(catalog.length<1800||new Set(catalog.map(r=>r.code)).size!==catalog.length)throw new Error('Official catalog inconsistent');
+          writeFileSync('catalog.json',JSON.stringify(catalog));console.log('Official full-market universe:',catalog.length);
+          JS
       - name: Scan and export report without LINE messages
         env:
           LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
@@ -29,7 +48,23 @@ jobs:
           LINE_GROUP_ID_2: ${{ secrets.LINE_GROUP_ID_2 }}
           LINE_EXPORT_ONLY: '1'
           LINE_REPORT_PATH: report.json
+          LINE_UNIVERSE_PATH: catalog.json
         run: python auto_scan.py
+      - name: Preserve completed market report
+        uses: actions/upload-artifact@v4
+        with:
+          name: market-report
+          path: report.json
+          retention-days: 2
+          if-no-files-found: error
+  publish-report:
+    needs: scan-market
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read completed market report
+        uses: actions/download-artifact@v4
+        with:
+          name: market-report
       - name: Update signed report cache without LINE messages
         env:
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
