@@ -1,30 +1,36 @@
-name: Configure LINE Reply Receiver
+name: Daily Stock Scan
+
 on:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/daily_scan.yml']
-permissions:
-  contents: read
+  # Free Reply API mode: group members send 掃描 to request a report.
+  # Scheduled push is disabled to avoid paid message consumption.
+  workflow_dispatch:
+    inputs:
+      test_only:
+        description: "只發送 LINE 連線測試訊息"
+        type: boolean
+        required: false
+        default: false
+
 jobs:
-  encrypted-config:
+  run-scanner:
     runs-on: ubuntu-latest
     steps:
-      - name: Transfer approved runtime settings using one-time encryption
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Script
         env:
           LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           LINE_GROUP_ID_2: ${{ secrets.LINE_GROUP_ID_2 }}
-        run: |
-          python - <<'PY'
-          import os, json, base64, subprocess, tempfile
-          public_key = "-----BEGIN PUBLIC KEY-----\nMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvwelg+En4CJTns00Q3Lu\nt2iGJc8YpS5OOPrFutRdKRMqmGvNPu5O0Bw1Fv2S6F8Y0x+gRwGdzDi6r1s7zd0T\nqPNO5WRmJopS/ldHrZ8ADfVyD0HtbsCcdyz7S8frl0oVJ1nD2RI7qzwbYcUi8mD1\nyCk5Je5pB0/jx1yYdqUFvuxAwADnq/PS2f7PLMm25MS6itLaDiIVEUFmRtYLllIi\nyNCjHDE+V6lt9zY0adFGnR8EnJnIRz6FZgeleDJitfBsHQ09X325WTRyQgGcPg0f\nUO0U8cuEohD4Nh9SPpRaRA75feorDSuyTlsjHgrZM8PfvqGnml7Vg6i4ccjDghOH\n3hFJPEYfxOjSYb08fCIjBjy2SPXYmSLWpt3vrt4LWDbZG7Vrg+bGmQMyzlLRWXDj\ncHpHAt27z99u/Llp4THYOxBuoZaWRjsE874Fw8yHfoB/KCFoHay5TSJumZKgjx06\nLuTdwGG+hNOCXiStpC1/15OrAo9E9TzGkIh3zrLZzItOHMgieRMvxM/117HM4Szf\n99+AGtwLeTjkw/EbSDc9aqzVDQHqYbgWa7XMb7fN2EgaLB1uh31zXNr6Vn8eAxDB\nm6ylR2tlDRcugaA+RIwaXx/S/HGCoYa4IvTsutRL+3m45KDKsY35GLgGh/9Y49LT\nbynfgOWZwXX68vHTLwEnwccCAwEAAQ==\n-----END PUBLIC KEY-----\n"
-          keys = ['LINE_CHANNEL_ID','LINE_CHANNEL_SECRET','LINE_USER_ID','LINE_GROUP_ID_2']
-          values = {k: os.environ.get(k,'') for k in keys}
-          if not all(values.values()):
-              raise SystemExit('Required runtime setting is missing')
-          with tempfile.NamedTemporaryFile() as f:
-              f.write(public_key.encode()); f.flush()
-              r = subprocess.run(['openssl','pkeyutl','-encrypt','-pubin','-inkey',f.name,'-pkeyopt','rsa_padding_mode:oaep','-pkeyopt','rsa_oaep_md:sha256'], input=json.dumps(values).encode(), capture_output=True, check=True)
-          print('ENCRYPTED_LINE_CONFIG:'+base64.b64encode(r.stdout).decode())
-          PY
+          LINE_TEST_ONLY: ${{ inputs.test_only && '1' || '0' }}
+        run: python auto_scan.py
