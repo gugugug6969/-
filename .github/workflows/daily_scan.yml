@@ -1,23 +1,36 @@
-name: Check deployed stock data acquisition
+name: Daily Stock Scan
+
 on:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/daily_scan.yml']
-permissions:
-  contents: read
+  # Free Reply API mode: group members send 掃描 to request a report.
+  # Scheduled push is disabled to avoid paid message consumption.
+  workflow_dispatch:
+    inputs:
+      test_only:
+        description: "只發送 LINE 連線測試訊息"
+        type: boolean
+        required: false
+        default: false
+
 jobs:
-  check-data:
+  run-scanner:
     runs-on: ubuntu-latest
     steps:
-      - name: Run signed data diagnostic without LINE messages
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Script
         env:
+          LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
-        run: |
-          node --input-type=module <<'JS'
-          import {createHmac} from 'node:crypto';
-          const body=JSON.stringify({operation:'scan',timestamp:Date.now()});
-          const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(body).digest('base64');
-          const r=await fetch('https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/diagnostics',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body,signal:AbortSignal.timeout(30000)});
-          console.log('Stock diagnostic status:',r.status);
-          console.log('Stock diagnostic result:',(await r.text()).slice(0,2000));
-          JS
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          LINE_GROUP_ID_2: ${{ secrets.LINE_GROUP_ID_2 }}
+          LINE_TEST_ONLY: ${{ inputs.test_only && '1' || '0' }}
+        run: python auto_scan.py
