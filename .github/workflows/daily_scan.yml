@@ -1,9 +1,6 @@
 name: Daily Stock Report Cache
 
 on:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/daily_scan.yml']
   schedule:
     # Weekdays 15:05 Asia/Taipei; GitHub may delay scheduled jobs.
     - cron: '5 7 * * 1,2,3,4,5'
