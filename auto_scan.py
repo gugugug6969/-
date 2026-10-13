@@ -2,6 +2,7 @@ import os
 import json
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import pandas as pd
 import numpy as np
 import requests
@@ -268,32 +269,49 @@ if __name__ == "__main__":
     snapshots = []
     successful = 0
     data_dates = set()
-    for item in scan_items:
+    def fetch_stock(item):
         code, name = item["code"], item["name"]
-        attempted += 1
         try:
-            ticker = yf.Ticker(code + "." + item["market"])
-            df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
-            if df.empty or len(df) < 30: continue
+            df = yf.Ticker(code + "." + item["market"]).history(period="6mo", interval="1d", auto_adjust=True, timeout=10)
+            if df.empty or len(df) < 30: return None, None, False
             close_series = df["Close"].dropna()
             closes = close_series.to_numpy()
-            if len(closes) < max(PARAMS["bb_period"], PARAMS["rsi_long"]) + PARAMS["grace"] + 5: continue
-            r = analyze(code, closes, name, PARAMS)
-            data_date = close_series.index[-1].strftime("%Y/%m/%d")
-            snapshot = stock_snapshot(code, closes, name, PARAMS, data_date)
-            if snapshot is None: continue
-            snapshots.append(snapshot)
-            data_dates.add(data_date)
-            successful += 1
-            if r: results.append(r)
+            if len(closes) < max(PARAMS["bb_period"], PARAMS["rsi_long"]) + PARAMS["grace"] + 5: return None, None, False
+            date = close_series.index[-1].strftime("%Y/%m/%d")
+            snapshot = stock_snapshot(code, closes, name, PARAMS, date)
+            return snapshot, analyze(code, closes, name, PARAMS) if snapshot else None, False
         except YFRateLimitError:
-            rate_limited = True
-            print("價格來源限流，已停止後續請求，不重試或切換來源。")
-            break
-        except Exception: continue
-        finally:
-            if attempted % 100 == 0:
-                print(f"資料進度：已嘗試 {attempted}/{len(scan_items)}；成功 {successful}", flush=True)
+            return None, None, True
+        except Exception:
+            return None, None, False
+
+    iterator = iter(scan_items)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = set()
+        for _ in range(2):
+            item = next(iterator, None)
+            if item is not None:
+                pending.add(pool.submit(fetch_stock, item)); attempted += 1
+        completed = 0
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                snapshot, result, limited = future.result()
+                completed += 1
+                if snapshot:
+                    snapshots.append(snapshot); successful += 1; data_dates.add(snapshot["dataDate"])
+                    if result: results.append(result)
+                if limited: rate_limited = True
+                if completed % 100 == 0:
+                    print(f"資料進度：已完成 {completed}/{len(scan_items)}；成功 {successful}", flush=True)
+            if rate_limited:
+                print("價格來源限流，已停止後續請求，不重試或切換來源。", flush=True)
+                for future in pending: future.cancel()
+                break
+            for _ in done:
+                item = next(iterator, None)
+                if item is not None:
+                    pending.add(pool.submit(fetch_stock, item)); attempted += 1
 
     results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
     
