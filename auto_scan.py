@@ -131,6 +131,29 @@ def get_channel_access_token(channel_id, channel_secret):
         return resp.json().get("access_token") if resp.status_code == 200 else None
     except Exception: return None
 
+def inspect_line_delivery(token, targets):
+    headers = {"Authorization": f"Bearer {token}"}
+    summary = {}
+    try:
+        for label, path in [("quota", "quota"), ("consumption", "quota/consumption")]:
+            response = requests.get("https://api.line.me/v2/bot/message/" + path, headers=headers, timeout=15)
+            if response.status_code != 200:
+                print(f"LINE 額度查詢失敗：{label} HTTP {response.status_code}")
+                return False
+            payload = response.json()
+            summary[label] = {key: payload[key] for key in ["type", "value", "totalUsage"] if key in payload}
+        counts = []
+        for index, target in enumerate(targets, 1):
+            if target.startswith("C"):
+                response = requests.get(f"https://api.line.me/v2/bot/group/{target}/members/count", headers=headers, timeout=15)
+                counts.append({"target_index": index, "status": response.status_code, "member_count": response.json().get("count") if response.status_code == 200 else None})
+        summary["group_counts"] = counts
+        print("LINE 訊息額度：" + json.dumps(summary, ensure_ascii=False))
+        return True
+    except (requests.RequestException, ValueError):
+        print("LINE 額度查詢連線或回應解析失敗。")
+        return False
+
 def build_report_message(results, rsi_short, rsi_long, params, scan_summary=None):
     now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y/%m/%d %H:%M")
     buys = [r for r in results if r["signal"] == "BUY"]
@@ -162,6 +185,11 @@ def line_push(token, user_id, text):
                       headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                       json={"to": user_id, "messages": [{"type": "text", "text": text[:4800]}]}, timeout=10)
         print(f"LINE 回應狀態碼: {resp.status_code}")
+        if resp.status_code != 200:
+            try:
+                print("LINE 錯誤原因：" + str(resp.json().get("message", "未提供錯誤原因")))
+            except ValueError:
+                print("LINE 錯誤原因：非 JSON 回應。")
         return resp.status_code == 200
     except requests.RequestException:
         print("LINE 推播連線失敗。")
@@ -187,6 +215,13 @@ if __name__ == "__main__":
         print(f"錯誤：{error}")
         exit(1)
         
+    if os.environ.get("LINE_QUOTA_ONLY") == "1":
+        token = get_channel_access_token(LINE_CHANNEL_ID, LINE_CHANNEL_SECRET)
+        if not token:
+            print("錯誤：無法換取 LINE Access Token。")
+            exit(1)
+        exit(0 if inspect_line_delivery(token, targets) else 1)
+
     if os.environ.get("LINE_TEST_ONLY") == "1":
         if len(targets) != 2:
             print("錯誤：第二群 LINE_GROUP_ID_2 尚未設定；此次測試不會發送。")
