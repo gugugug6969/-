@@ -263,11 +263,26 @@ if __name__ == "__main__":
             raise ValueError("股票名單出現重複代號，停止更新。")
     else:
         scan_items = [{"code": code, "name": STOCK_NAMES.get(code, code), "market": "TW"} for code in CODES]
+    previous_quotes = {}
+    previous_path = os.environ.get("LINE_PREVIOUS_REPORT_PATH")
+    if previous_path and os.path.exists(previous_path):
+        try:
+            with open(previous_path, encoding="utf-8") as prior_file:
+                previous = json.load(prior_file)
+            current_codes = {item["code"] for item in scan_items}
+            if datetime.now(timezone.utc).timestamp() * 1000 - previous["generatedAt"] < 7 * 86400000:
+                for quote in previous.get("snapshots", []):
+                    if quote["code"] in current_codes:
+                        previous_quotes[quote["code"]] = quote
+        except (ValueError, KeyError, TypeError):
+            previous_quotes = {}
+    scan_items.sort(key=lambda item: (item["code"] in previous_quotes, previous_quotes.get(item["code"], {}).get("dataDate", ""), item["code"]))
+    snapshot_map = dict(previous_quotes)
     attempted = 0
     rate_limited = False
     results = []
     snapshots = []
-    successful = 0
+    successful = len(snapshot_map)
     data_dates = set()
     def fetch_stock(item):
         code, name = item["code"], item["name"]
@@ -299,8 +314,10 @@ if __name__ == "__main__":
                 snapshot, result, limited = future.result()
                 completed += 1
                 if snapshot:
-                    snapshots.append(snapshot); successful += 1; data_dates.add(snapshot["dataDate"])
-                    if result: results.append(result)
+                    prior = snapshot_map.get(snapshot["code"])
+                    if prior is None or snapshot["dataDate"] >= prior["dataDate"]:
+                        snapshot_map[snapshot["code"]] = snapshot
+                    successful = len(snapshot_map)
                 if limited: rate_limited = True
                 if completed % 100 == 0:
                     print(f"資料進度：已完成 {completed}/{len(scan_items)}；成功 {successful}", flush=True)
@@ -313,6 +330,9 @@ if __name__ == "__main__":
                 if item is not None:
                     pending.add(pool.submit(fetch_stock, item)); attempted += 1
 
+    snapshots = sorted(snapshot_map.values(), key=lambda row: row["code"])
+    data_dates = {row["dataDate"] for row in snapshots}
+    results = [{key: value for key, value in row.items() if key != "dataDate"} for row in snapshots if row["signal"] in ("BUY", "WATCH")]
     results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
     
     if not successful:
