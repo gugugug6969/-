@@ -123,6 +123,23 @@ def analyze(code, closes, name, params):
         "stop": round(lower[-1], 2), "target": round(upper[-1], 2), "rrr": rrr,
     }
 
+def stock_snapshot(code, closes, name, params, data_date):
+    """Return indicators even when the strategy has no BUY/WATCH signal."""
+    signal = analyze(code, closes, name, params)
+    if signal:
+        return dict(signal, dataDate=data_date)
+    upper, middle, lower, pct_b = calc_bollinger(closes, params["bb_period"], params["bb_std"])
+    short = calc_rsi(closes, params["rsi_short"])
+    long = calc_rsi(closes, params["rsi_long"])
+    if not np.isfinite([closes[-1], pct_b[-1], short[-1], long[-1], lower[-1], upper[-1]]).all():
+        return None
+    risk, reward = closes[-1] - lower[-1], upper[-1] - closes[-1]
+    return {"code": code, "name": name, "signal": "NONE", "dataDate": data_date,
+            "price": round(closes[-1], 2), "pct_b": round(pct_b[-1], 3),
+            "rsi_s": round(short[-1], 1), "rsi_l": round(long[-1], 1),
+            "stop": round(lower[-1], 2), "target": round(upper[-1], 2),
+            "rrr": round(reward / risk, 2) if risk > 0 else None}
+
 def get_channel_access_token(channel_id, channel_secret):
     try:
         resp = requests.post("https://api.line.me/v2/oauth/accessToken",
@@ -235,6 +252,7 @@ if __name__ == "__main__":
         exit(0 if push_report(token, targets, message) else 1)
 
     results = []
+    snapshots = []
     successful = 0
     data_dates = set()
     for code in CODES:
@@ -247,7 +265,11 @@ if __name__ == "__main__":
             if len(closes) < max(PARAMS["bb_period"], PARAMS["rsi_long"]) + PARAMS["grace"] + 5: continue
             name = STOCK_NAMES.get(code, code)
             r = analyze(code, closes, name, PARAMS)
-            data_dates.add(close_series.index[-1].strftime("%Y/%m/%d"))
+            data_date = close_series.index[-1].strftime("%Y/%m/%d")
+            snapshot = stock_snapshot(code, closes, name, PARAMS, data_date)
+            if snapshot is None: continue
+            snapshots.append(snapshot)
+            data_dates.add(data_date)
             successful += 1
             if r: results.append(r)
         except Exception: continue
@@ -264,7 +286,7 @@ if __name__ == "__main__":
     print("掃描結果：" + json.dumps(results, ensure_ascii=False, default=float))
 
     if os.environ.get("LINE_EXPORT_ONLY") == "1":
-        payload = {"results": results, "successful": successful, "total": len(CODES),
+        payload = {"results": results, "snapshots": snapshots, "successful": successful, "total": len(CODES),
                    "dataDates": ordered_dates,
                    "generatedAt": int(datetime.now(timezone.utc).timestamp() * 1000)}
         with open(os.environ.get("LINE_REPORT_PATH", "report.json"), "w", encoding="utf-8") as output:
