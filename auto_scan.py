@@ -1,6 +1,7 @@
 import os
 import json
 import yfinance as yf
+from yfinance.exceptions import YFRateLimitError
 import pandas as pd
 import numpy as np
 import requests
@@ -251,19 +252,32 @@ if __name__ == "__main__":
         message = f"✅ 台股掃描器｜LINE 推播測試\n兩群通知連線測試。\n測試時間：{tested_at}"
         exit(0 if push_report(token, targets, message) else 1)
 
+    universe_path = os.environ.get("LINE_UNIVERSE_PATH")
+    if universe_path:
+        with open(universe_path, encoding="utf-8") as source:
+            scan_items = json.load(source)
+        if not isinstance(scan_items, list) or not 1800 <= len(scan_items) <= 5000:
+            raise ValueError("全市場股票名單不完整，停止更新。")
+        if len({item["code"] for item in scan_items}) != len(scan_items):
+            raise ValueError("股票名單出現重複代號，停止更新。")
+    else:
+        scan_items = [{"code": code, "name": STOCK_NAMES.get(code, code), "market": "TW"} for code in CODES]
+    attempted = 0
+    rate_limited = False
     results = []
     snapshots = []
     successful = 0
     data_dates = set()
-    for code in CODES:
+    for item in scan_items:
+        code, name = item["code"], item["name"]
+        attempted += 1
         try:
-            ticker = yf.Ticker(code + ".TW")
+            ticker = yf.Ticker(code + "." + item["market"])
             df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
             if df.empty or len(df) < 30: continue
             close_series = df["Close"].dropna()
             closes = close_series.to_numpy()
             if len(closes) < max(PARAMS["bb_period"], PARAMS["rsi_long"]) + PARAMS["grace"] + 5: continue
-            name = STOCK_NAMES.get(code, code)
             r = analyze(code, closes, name, PARAMS)
             data_date = close_series.index[-1].strftime("%Y/%m/%d")
             snapshot = stock_snapshot(code, closes, name, PARAMS, data_date)
@@ -272,7 +286,14 @@ if __name__ == "__main__":
             data_dates.add(data_date)
             successful += 1
             if r: results.append(r)
+        except YFRateLimitError:
+            rate_limited = True
+            print("價格來源限流，已停止後續請求，不重試或切換來源。")
+            break
         except Exception: continue
+        finally:
+            if attempted % 100 == 0:
+                print(f"資料進度：已嘗試 {attempted}/{len(scan_items)}；成功 {successful}", flush=True)
 
     results.sort(key=lambda x: (0 if x["signal"] == "BUY" else 1, -(x["rrr"] or 0)))
     
@@ -281,12 +302,13 @@ if __name__ == "__main__":
         exit(1)
     ordered_dates = sorted(data_dates)
     date_label = ordered_dates[0] if len(ordered_dates) == 1 else f"{ordered_dates[0]}～{ordered_dates[-1]}"
-    scan_summary = {"successful": successful, "total": len(CODES), "data_date": date_label}
+    scan_summary = {"successful": successful, "total": len(scan_items), "data_date": date_label}
     print("掃描摘要：" + json.dumps(scan_summary, ensure_ascii=False))
     print("掃描結果：" + json.dumps(results, ensure_ascii=False, default=float))
 
     if os.environ.get("LINE_EXPORT_ONLY") == "1":
-        payload = {"results": results, "snapshots": snapshots, "successful": successful, "total": len(CODES),
+        payload = {"results": results, "snapshots": snapshots, "successful": successful, "total": len(scan_items),
+                   "catalog": scan_items, "attempted": attempted, "rateLimited": rate_limited,
                    "dataDates": ordered_dates,
                    "generatedAt": int(datetime.now(timezone.utc).timestamp() * 1000)}
         with open(os.environ.get("LINE_REPORT_PATH", "report.json"), "w", encoding="utf-8") as output:
