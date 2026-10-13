@@ -1,36 +1,40 @@
-name: Daily Stock Scan
-
+name: Activate LINE Reply Receiver
 on:
-  # Free Reply API mode: group members send 掃描 to request a report.
-  # Scheduled push is disabled to avoid paid message consumption.
-  workflow_dispatch:
-    inputs:
-      test_only:
-        description: "只發送 LINE 連線測試訊息"
-        type: boolean
-        required: false
-        default: false
-
+  push:
+    branches: [main]
+    paths: ['.github/workflows/daily_scan.yml']
+permissions:
+  contents: read
 jobs:
-  run-scanner:
+  activate-webhook:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run Script
+      - name: Configure and verify approved LINE endpoint
         env:
           LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           LINE_GROUP_ID_2: ${{ secrets.LINE_GROUP_ID_2 }}
-          LINE_TEST_ONLY: ${{ inputs.test_only && '1' || '0' }}
-        run: python auto_scan.py
+        run: |
+          python - <<'PY'
+          import os,json,urllib.request
+          endpoint='https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/webhook'
+          data=urllib.parse.urlencode({'grant_type':'client_credentials','client_id':os.environ['LINE_CHANNEL_ID'],'client_secret':os.environ['LINE_CHANNEL_SECRET']}).encode()
+          a=json.load(urllib.request.urlopen(urllib.request.Request('https://api.line.me/v2/oauth/accessToken',data=data),timeout=20))
+          headers={'Authorization':'Bearer '+a['access_token'],'Content-Type':'application/json'}
+          def call(path,method='GET',body=None):
+              req=urllib.request.Request('https://api.line.me'+path,headers=headers,method=method,data=json.dumps(body).encode() if body is not None else None)
+              with urllib.request.urlopen(req,timeout=20) as r:return json.load(r)
+          test=call('/v2/bot/channel/webhook/test','POST',{'endpoint':endpoint})
+          print('Webhook test:',json.dumps(test))
+          if not test.get('success'):raise SystemExit('Endpoint test failed; original setting preserved')
+          info=call('/v2/bot/channel/webhook/endpoint')
+          if info.get('endpoint')!=endpoint:
+              call('/v2/bot/channel/webhook/endpoint','PUT',{'endpoint':endpoint})
+          info=call('/v2/bot/channel/webhook/endpoint')
+          print('Webhook configuration:',json.dumps(info))
+          if info.get('endpoint')!=endpoint:raise SystemExit('Endpoint verification failed')
+          for i,key in enumerate(['LINE_USER_ID','LINE_GROUP_ID_2'],1):
+              count=call('/v2/bot/group/'+os.environ[key]+'/members/count')
+              print('Group',i,'members:',count.get('count'))
+          PY
