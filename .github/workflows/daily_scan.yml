@@ -1,36 +1,28 @@
-name: Daily Stock Scan
-
+name: Restore real scan report and validate free Reply format
 on:
-  # Free Reply API mode: group members send 掃描 to request a report.
-  # Scheduled push is disabled to avoid paid message consumption.
-  workflow_dispatch:
-    inputs:
-      test_only:
-        description: "只發送 LINE 連線測試訊息"
-        type: boolean
-        required: false
-        default: false
-
+  push:
+    branches: [main]
+    paths: ['.github/workflows/daily_scan.yml']
+permissions:
+  contents: read
 jobs:
-  run-scanner:
+  restore-report:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run Script
+      - name: Restore October 13 scan and validate without sending LINE messages
         env:
           LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          LINE_GROUP_ID_2: ${{ secrets.LINE_GROUP_ID_2 }}
-          LINE_TEST_ONLY: ${{ inputs.test_only && '1' || '0' }}
-        run: python auto_scan.py
+        run: |
+          node --input-type=module <<'JS'
+          import {createHmac} from 'node:crypto';
+          const report={"results":[{"code":"2812","name":"台中銀","signal":"BUY","price":18.6,"pct_b":0.133,"rsi_s":32.6,"rsi_l":37.8,"stop":18.44,"target":19.65,"rrr":6.52},{"code":"5871","name":"中租-KY","signal":"BUY","price":106,"pct_b":0.259,"rsi_s":39,"rsi_l":38.1,"stop":103.07,"target":114.38,"rrr":2.86},{"code":"2897","name":"王道銀","signal":"BUY","price":10.85,"pct_b":0.386,"rsi_s":56.5,"rsi_l":52.5,"stop":10.51,"target":11.39,"rrr":1.59},{"code":"2834","name":"臺企銀","signal":"BUY","price":17.75,"pct_b":0.417,"rsi_s":57.2,"rsi_l":53.9,"stop":17.1,"target":18.66,"rrr":1.4},{"code":"3034","name":"聯詠","signal":"BUY","price":546,"pct_b":0.553,"rsi_s":57.7,"rsi_l":53.2,"stop":529.72,"target":559.18,"rrr":0.81},{"code":"2889","name":"國票金","signal":"BUY","price":16.8,"pct_b":0.599,"rsi_s":68.5,"rsi_l":60.6,"stop":15.89,"target":17.41,"rrr":0.67},{"code":"2887","name":"台新金","signal":"BUY","price":43,"pct_b":0.601,"rsi_s":62.3,"rsi_l":58.8,"stop":40.24,"target":44.83,"rrr":0.66},{"code":"2886","name":"兆豐金","signal":"BUY","price":50.9,"pct_b":0.643,"rsi_s":68.2,"rsi_l":59.4,"stop":47.93,"target":52.55,"rrr":0.56},{"code":"5880","name":"合庫金","signal":"BUY","price":27.2,"pct_b":0.717,"rsi_s":72.3,"rsi_l":63.5,"stop":25.63,"target":27.82,"rrr":0.39},{"code":"2885","name":"元大金","signal":"BUY","price":70.6,"pct_b":0.819,"rsi_s":62.9,"rsi_l":59.1,"stop":67.11,"target":71.37,"rrr":0.22},{"code":"2439","name":"美律","signal":"BUY","price":81.4,"pct_b":1.09,"rsi_s":78.6,"rsi_l":67.1,"stop":74.64,"target":80.84,"rrr":-0.08},{"code":"2882","name":"國泰金","signal":"BUY","price":114.5,"pct_b":1.147,"rsi_s":65,"rsi_l":61,"stop":109.27,"target":113.83,"rrr":-0.13},{"code":"4938","name":"和碩","signal":"BUY","price":102.5,"pct_b":1.544,"rsi_s":89.5,"rsi_l":78.8,"stop":85.08,"target":96.37,"rrr":-0.35},{"code":"2324","name":"仁寶","signal":"WATCH","price":35.8,"pct_b":0.188,"rsi_s":38,"rsi_l":39.3,"stop":35.17,"target":38.51,"rrr":4.31},{"code":"2353","name":"宏碁","signal":"WATCH","price":31.25,"pct_b":0.309,"rsi_s":42.8,"rsi_l":47.1,"stop":30.79,"target":32.28,"rrr":2.24},{"code":"2352","name":"佳世達","signal":"WATCH","price":28.95,"pct_b":0.452,"rsi_s":50,"rsi_l":50,"stop":28.39,"target":29.63,"rrr":1.21}],"successful":99,"total":100,"dataDates":["2026/10/13"],"generatedAt":1791903237550};
+          const body=JSON.stringify({operation:'publish_report',timestamp:Date.now(),report});
+          const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(body).digest('base64');
+          const r=await fetch('https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body,signal:AbortSignal.timeout(30000)});
+          console.log('Report restore HTTP:',r.status);console.log('Report restore result:',(await r.text()).slice(0,1000));if(r.status!==200)throw new Error('Restore failed');
+          const auth=await fetch('https://api.line.me/v2/oauth/accessToken',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'client_credentials',client_id:process.env.LINE_CHANNEL_ID,client_secret:process.env.LINE_CHANNEL_SECRET})});
+          if(!auth.ok)throw new Error('LINE auth HTTP '+auth.status);const token=(await auth.json()).access_token;
+          const v=await fetch('https://api.line.me/v2/bot/message/validate/reply',{method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:JSON.stringify({messages:[{"type":"text","text":"📈 台股 BB／RSI 掃描\n最近一次掃描：2026/10/13 22:53（已保存報表）\n資料交易日：2026/10/13\n資料成功：99/100 檔\nBB20／2σ・%B<0.2・寬限7日・RSI6/12\n\n✅ BUY 策略訊號（13檔）\n2812 台中銀｜18.60\nRSI 32.6／37.8・%B 0.133・風報比 6.52\n下軌 18.44／上軌 19.65\n5871 中租-KY｜106.00\nRSI 39.0／38.1・%B 0.259・風報比 2.86\n下軌 103.07／上軌 114.38\n2897 王道銀｜10.85\nRSI 56.5／52.5・%B 0.386・風報比 1.59\n下軌 10.51／上軌 11.39\n2834 臺企銀｜17.75\nRSI 57.2／53.9・%B 0.417・風報比 1.40\n下軌 17.10／上軌 18.66\n3034 聯詠｜546.00\nRSI 57.7／53.2・%B 0.553・風報比 0.81\n下軌 529.72／上軌 559.18\n2889 國票金｜16.80\nRSI 68.5／60.6・%B 0.599・風報比 0.67\n下軌 15.89／上軌 17.41\n2887 台新金｜43.00\nRSI 62.3／58.8・%B 0.601・風報比 0.66\n下軌 40.24／上軌 44.83\n2886 兆豐金｜50.90\nRSI 68.2／59.4・%B 0.643・風報比 0.56\n下軌 47.93／上軌 52.55\n5880 合庫金｜27.20\nRSI 72.3／63.5・%B 0.717・風報比 0.39\n下軌 25.63／上軌 27.82\n2885 元大金｜70.60\nRSI 62.9／59.1・%B 0.819・風報比 0.22\n下軌 67.11／上軌 71.37\n2439 美律｜81.40\nRSI 78.6／67.1・%B 1.090・風報比 -0.08\n下軌 74.64／上軌 80.84\n2882 國泰金｜114.50\nRSI 65.0／61.0・%B 1.147・風報比 -0.13\n下軌 109.27／上軌 113.83\n4938 和碩｜102.50\nRSI 89.5／78.8・%B 1.544・風報比 -0.35\n下軌 85.08／上軌 96.37\n\n👀 WATCH 觀察（3檔）\n2324 仁寶｜35.80\nRSI 38.0／39.3・%B 0.188・風報比 4.31\n下軌 35.17／上軌 38.51\n2353 宏碁｜31.25\nRSI 42.8／47.1・%B 0.309・風報比 2.24\n下軌 30.79／上軌 32.28\n2352 佳世達｜28.95\nRSI 50.0／50.0・%B 0.452・風報比 1.21\n下軌 28.39／上軌 29.63\n\nBB／RSI 策略篩選結果"}]})});
+          console.log('Actual report Reply format validation HTTP:',v.status);await v.body?.cancel();if(v.status!==200)throw new Error('LINE format invalid');
+          JS
