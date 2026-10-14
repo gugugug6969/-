@@ -366,7 +366,7 @@ if(!response.ok)throw new Error('Default report publication failed');
             for _ in done:
                 item = next(iterator, None)
                 if item is not None:
-                    pending.add(pool.submit(fetch_stock, item)); attempted += 1
+                    future = pool.submit(fetch_stock, item); pending.add(future); future_codes[future] = item["code"]; attempted += 1
 
     if not default_published:
         publish_default_report()
