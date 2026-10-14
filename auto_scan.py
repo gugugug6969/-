@@ -291,8 +291,9 @@ if __name__ == "__main__":
     data_dates = set()
     completed_codes = set()
     default_published = False
-    history_end = datetime.now(timezone.utc) + timedelta(days=1)
-    history_start = history_end - timedelta(days=190)
+    taipei_now = datetime.now(timezone(timedelta(hours=8)))
+    history_end = taipei_now + timedelta(days=1 if taipei_now.hour >= 15 else 0)
+    history_start = history_end - pd.DateOffset(months=6)
 
     def publish_default_report():
         if os.environ.get("LINE_PUBLISH_DEFAULT") != "1": return
