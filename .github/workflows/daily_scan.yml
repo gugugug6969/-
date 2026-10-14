@@ -1,96 +1,36 @@
-name: Daily Stock Report Cache
-
+name: Diagnose LINE Webhook Delivery
 on:
-  schedule:
-    # Weekdays 15:05 Asia/Taipei; GitHub may delay scheduled jobs.
-    - cron: '5 7 * * 1,2,3,4,5'
-  workflow_dispatch:
-
+  push:
+    branches: [main]
+    paths: ['.github/workflows/daily_scan.yml']
 permissions:
   contents: read
-
 jobs:
-  scan-market:
+  diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 3
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Load official TWSE and TPEX listed company catalog
-        run: |
-          node --input-type=module <<'JS'
-          import {writeFileSync} from 'node:fs';
-          const catalog=[];
-          for(const [market,url] of [['TW','https://openapi.twse.com.tw/v1/opendata/t187ap03_L'],['TWO','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O']]){
-            const response=await fetch(url,{signal:AbortSignal.timeout(60000)});if(!response.ok)throw new Error('Official catalog HTTP '+response.status);
-            const rows=await response.json();if(!Array.isArray(rows)||rows.length<(market==='TW'?900:700))throw new Error('Official catalog incomplete');
-            for(const row of rows){const code=String(row['公司代號']??row.SecuritiesCompanyCode??'').trim(),name=String(row['公司簡稱']??row.CompanyAbbreviation??'').trim(),full=String(row['公司名稱']??row.CompanyName??'').trim();
-              if(/^\d{4,6}$/.test(code)&&name){const aliases=[...new Set([full,full.replace(/股份有限公司$/u,'')].filter(v=>v&&v!==name&&v.length<=80))];catalog.push({code,name,market,aliases});}
-            }
-          }
-          if(catalog.length<1800||new Set(catalog.map(r=>r.code)).size!==catalog.length)throw new Error('Official catalog inconsistent');
-          writeFileSync('catalog.json',JSON.stringify(catalog));console.log('Official full-market universe:',catalog.length);
-          JS
-      - name: Load signed prior report to continue missing stocks first
-        env:
-          LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
-        run: |
-          node --input-type=module <<'JS'
-          import {writeFileSync} from 'node:fs';
-          import {createHmac} from 'node:crypto';
-          const body=JSON.stringify({operation:'export_state',timestamp:Date.now()});
-          const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(body).digest('base64');
-          const r=await fetch('https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body,signal:AbortSignal.timeout(30000)});
-          if(!r.ok)throw new Error('Prior report HTTP '+r.status);
-          const data=await r.json();if(data.report)writeFileSync('previous-report.json',JSON.stringify(data.report));
-          console.log('Prior saved stock details:',data.report?.snapshots?.length??0);
-          JS
-      - name: Scan and export report without LINE messages
+      - name: Check LINE delivery settings and endpoint reachability
         env:
           LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
-          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
-          LINE_GROUP_ID_2: ${{ secrets.LINE_GROUP_ID_2 }}
-          LINE_EXPORT_ONLY: '1'
-          LINE_PUBLISH_DEFAULT: '1'
-          LINE_REPORT_PATH: report.json
-          LINE_UNIVERSE_PATH: catalog.json
-          LINE_PREVIOUS_REPORT_PATH: previous-report.json
-        run: python auto_scan.py
-      - name: Preserve completed market report
-        uses: actions/upload-artifact@v4
-        with:
-          name: market-report
-          path: report.json
-          retention-days: 2
-          if-no-files-found: error
-  publish-report:
-    needs: scan-market
-    runs-on: ubuntu-latest
-    steps:
-      - name: Read completed market report
-        uses: actions/download-artifact@v4
-        with:
-          name: market-report
-      - name: Update signed report cache without LINE messages
-        env:
-          LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
         run: |
           node --input-type=module <<'JS'
-          import {readFileSync} from 'node:fs';
           import {createHmac} from 'node:crypto';
-          const report=JSON.parse(readFileSync('report.json','utf8'));
-          const body=JSON.stringify({operation:'publish_report',timestamp:Date.now(),report});
-          const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(body).digest('base64');
-          const r=await fetch('https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body,signal:AbortSignal.timeout(30000)});
-          const result=await r.text();
-          console.log('Report update HTTP:',r.status);
-          console.log('Report update result:',result.slice(0,1000));
-          if(r.status!==200)throw new Error('Report update failed');
+          const origin='https://quant-lab-line-reply.nuttybirch8.chatgpt.site';
+          const a=await fetch('https://api.line.me/v2/oauth/accessToken',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'client_credentials',client_id:process.env.LINE_CHANNEL_ID,client_secret:process.env.LINE_CHANNEL_SECRET}),signal:AbortSignal.timeout(10000)});
+          if(!a.ok)throw new Error('LINE auth HTTP '+a.status);
+          const {access_token}=await a.json();
+          const headers={Authorization:'Bearer '+access_token,'Content-Type':'application/json'};
+          for(const path of ['/v2/bot/info','/v2/bot/channel/webhook/endpoint']){
+            const r=await fetch('https://api.line.me'+path,{headers,signal:AbortSignal.timeout(10000)});
+            console.log(path,r.status,await r.text());
+          }
+          const bytes=JSON.stringify({events:[]});
+          const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(bytes).digest('base64');
+          const start=Date.now();
+          const ping=await fetch(origin+'/api/line/webhook',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body:bytes,signal:AbortSignal.timeout(10000)});
+          console.log('SIGNED EMPTY WEBHOOK',ping.status,'MS',Date.now()-start,(await ping.text()).slice(0,200));
+          const verify=await fetch('https://api.line.me/v2/bot/channel/webhook/test',{method:'POST',headers,body:JSON.stringify({endpoint:origin+'/api/line/webhook'}),signal:AbortSignal.timeout(15000)});
+          console.log('LINE DELIVERY TEST',verify.status,await verify.text());
           JS
