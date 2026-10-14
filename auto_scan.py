@@ -281,6 +281,7 @@ if __name__ == "__main__":
         except (ValueError, KeyError, TypeError):
             previous_quotes = {}
     default_codes = set(CODES)
+    default_required = default_codes.intersection(item["code"] for item in scan_items)
     scan_items.sort(key=lambda item: (item["code"] not in default_codes, item["code"] in previous_quotes, previous_quotes.get(item["code"], {}).get("dataDate", ""), item["code"]))
     snapshot_map = dict(previous_quotes)
     attempted = 0
@@ -356,7 +357,7 @@ if(!response.ok)throw new Error('Default report publication failed');
                 if limited: rate_limited = True
                 if completed % 100 == 0:
                     print(f"資料進度：已完成 {completed}/{len(scan_items)}；成功 {successful}", flush=True)
-            if not default_published and default_codes.issubset(completed_codes):
+            if not default_published and default_required.issubset(completed_codes):
                 publish_default_report()
                 default_published = True
             if rate_limited:
