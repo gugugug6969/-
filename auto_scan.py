@@ -1,5 +1,8 @@
 import os
 import json
+import hmac
+import hashlib
+import base64
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -276,7 +279,8 @@ if __name__ == "__main__":
                         previous_quotes[quote["code"]] = quote
         except (ValueError, KeyError, TypeError):
             previous_quotes = {}
-    scan_items.sort(key=lambda item: (item["code"] in previous_quotes, previous_quotes.get(item["code"], {}).get("dataDate", ""), item["code"]))
+    default_codes = set(CODES)
+    scan_items.sort(key=lambda item: (item["code"] not in default_codes, item["code"] in previous_quotes, previous_quotes.get(item["code"], {}).get("dataDate", ""), item["code"]))
     snapshot_map = dict(previous_quotes)
     attempted = 0
     rate_limited = False
@@ -284,10 +288,30 @@ if __name__ == "__main__":
     snapshots = []
     successful = len(snapshot_map)
     data_dates = set()
+    completed_codes = set()
+    default_published = False
+    history_end = datetime.now(timezone.utc) + timedelta(days=1)
+    history_start = history_end - timedelta(days=190)
+
+    def publish_default_report():
+        if os.environ.get("LINE_PUBLISH_DEFAULT") != "1": return
+        quotes = sorted([row for row in snapshot_map.values() if row["code"] in default_codes], key=lambda row: row["code"])
+        if not quotes: return
+        report = {"catalog": [{"code": code, "name": STOCK_NAMES.get(code, code), "market": "TW"} for code in CODES],
+                  "snapshots": quotes, "results": [{key: value for key, value in row.items() if key != "dataDate"} for row in quotes if row["signal"] in ("BUY", "WATCH")],
+                  "successful": len(quotes), "total": len(CODES), "dataDates": sorted({row["dataDate"] for row in quotes}),
+                  "rateLimited": rate_limited, "generatedAt": int(datetime.now(timezone.utc).timestamp() * 1000)}
+        report["results"].sort(key=lambda row: (row["signal"] != "BUY", -(row["rrr"] or 0)))
+        raw = json.dumps({"operation": "publish_report", "scope": "default100", "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000), "report": report}, ensure_ascii=False).encode("utf-8")
+        signature = base64.b64encode(hmac.new(LINE_CHANNEL_SECRET.encode(), raw, hashlib.sha256).digest()).decode()
+        response = requests.post("https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports", data=raw, headers={"Content-Type": "application/json", "x-line-signature": signature}, timeout=20)
+        print("Default 100 cache HTTP:", response.status_code, "coverage:", len(quotes), "dates:", report["dataDates"], flush=True)
+        response.raise_for_status()
+
     def fetch_stock(item):
         code, name = item["code"], item["name"]
         try:
-            df = yf.Ticker(code + "." + item["market"]).history(period="6mo", interval="1d", auto_adjust=True, timeout=10)
+            df = yf.Ticker(code + "." + item["market"]).history(start=history_start.strftime("%Y-%m-%d"), end=history_end.strftime("%Y-%m-%d"), interval="1d", auto_adjust=True, timeout=10)
             if df.empty or len(df) < 30: return None, None, False
             close_series = df["Close"].dropna()
             closes = close_series.to_numpy()
@@ -303,16 +327,18 @@ if __name__ == "__main__":
     iterator = iter(scan_items)
     with ThreadPoolExecutor(max_workers=2) as pool:
         pending = set()
+        future_codes = {}
         for _ in range(2):
             item = next(iterator, None)
             if item is not None:
-                pending.add(pool.submit(fetch_stock, item)); attempted += 1
+                future = pool.submit(fetch_stock, item); pending.add(future); future_codes[future] = item["code"]; attempted += 1
         completed = 0
         while pending:
             done, pending = wait(pending, return_when=FIRST_COMPLETED)
             for future in done:
                 snapshot, result, limited = future.result()
                 completed += 1
+                completed_codes.add(future_codes.pop(future))
                 if snapshot:
                     prior = snapshot_map.get(snapshot["code"])
                     if prior is None or snapshot["dataDate"] >= prior["dataDate"]:
@@ -321,6 +347,9 @@ if __name__ == "__main__":
                 if limited: rate_limited = True
                 if completed % 100 == 0:
                     print(f"資料進度：已完成 {completed}/{len(scan_items)}；成功 {successful}", flush=True)
+            if not default_published and default_codes.issubset(completed_codes):
+                publish_default_report()
+                default_published = True
             if rate_limited:
                 print("價格來源限流，已停止後續請求，不重試或切換來源。", flush=True)
                 for future in pending: future.cancel()
@@ -330,6 +359,8 @@ if __name__ == "__main__":
                 if item is not None:
                     pending.add(pool.submit(fetch_stock, item)); attempted += 1
 
+    if not default_published:
+        publish_default_report()
     snapshots = sorted(snapshot_map.values(), key=lambda row: row["code"])
     data_dates = {row["dataDate"] for row in snapshots}
     results = [{key: value for key, value in row.items() if key != "dataDate"} for row in snapshots if row["signal"] in ("BUY", "WATCH")]
