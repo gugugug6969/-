@@ -1,57 +1,22 @@
-name: Daily Stock Report Cache
-
+name: Restore Default 100 Stock Report
 on:
-  schedule:
-    # Weekdays 15:05 Asia/Taipei; GitHub may delay scheduled jobs.
-    - cron: '5 7 * * 1,2,3,4,5'
+  push:
+    branches: [main]
+    paths: ['.github/workflows/daily_scan.yml']
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  scan-market:
+  refresh-default100:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Load official TWSE and TPEX listed company catalog
-        run: |
-          node --input-type=module <<'JS'
-          import {writeFileSync} from 'node:fs';
-          const catalog=[];
-          for(const [market,url] of [['TW','https://openapi.twse.com.tw/v1/opendata/t187ap03_L'],['TWO','https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O']]){
-            const response=await fetch(url,{signal:AbortSignal.timeout(60000)});if(!response.ok)throw new Error('Official catalog HTTP '+response.status);
-            const rows=await response.json();if(!Array.isArray(rows)||rows.length<(market==='TW'?900:700))throw new Error('Official catalog incomplete');
-            for(const row of rows){const code=String(row['公司代號']??row.SecuritiesCompanyCode??'').trim(),name=String(row['公司簡稱']??row.CompanyAbbreviation??'').trim(),full=String(row['公司名稱']??row.CompanyName??'').trim();
-              if(/^\d{4,6}$/.test(code)&&name){const aliases=[...new Set([full,full.replace(/股份有限公司$/u,'')].filter(v=>v&&v!==name&&v.length<=80))];catalog.push({code,name,market,aliases});}
-            }
-          }
-          if(catalog.length<1800||new Set(catalog.map(r=>r.code)).size!==catalog.length)throw new Error('Official catalog inconsistent');
-          writeFileSync('catalog.json',JSON.stringify(catalog));console.log('Official full-market universe:',catalog.length);
-          JS
-      - name: Load signed prior report to continue missing stocks first
-        env:
-          LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
-        run: |
-          node --input-type=module <<'JS'
-          import {writeFileSync} from 'node:fs';
-          import {createHmac} from 'node:crypto';
-          const body=JSON.stringify({operation:'export_state',timestamp:Date.now()});
-          const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(body).digest('base64');
-          const r=await fetch('https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body,signal:AbortSignal.timeout(30000)});
-          if(!r.ok)throw new Error('Prior report HTTP '+r.status);
-          const data=await r.json();if(data.report)writeFileSync('previous-report.json',JSON.stringify(data.report));
-          console.log('Prior saved stock details:',data.report?.snapshots?.length??0);
-          JS
-      - name: Scan and export report without LINE messages
+      - run: pip install -r requirements.txt
+      - name: Refresh original 100 only without LINE messages
         env:
           LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
@@ -60,37 +25,33 @@ jobs:
           LINE_EXPORT_ONLY: '1'
           LINE_PUBLISH_DEFAULT: '1'
           LINE_REPORT_PATH: report.json
-          LINE_UNIVERSE_PATH: catalog.json
-          LINE_PREVIOUS_REPORT_PATH: previous-report.json
         run: python auto_scan.py
-      - name: Preserve completed market report
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: market-report
+          name: original-100-report
           path: report.json
           retention-days: 2
-          if-no-files-found: error
-  publish-report:
-    needs: scan-market
-    runs-on: ubuntu-latest
-    steps:
-      - name: Read completed market report
-        uses: actions/download-artifact@v4
-        with:
-          name: market-report
-      - name: Update signed report cache without LINE messages
+      - name: Verify command results and LINE message format without sending
         env:
+          LINE_CHANNEL_ID: ${{ secrets.LINE_CHANNEL_ID }}
           LINE_CHANNEL_SECRET: ${{ secrets.LINE_CHANNEL_SECRET }}
         run: |
           node --input-type=module <<'JS'
-          import {readFileSync} from 'node:fs';
           import {createHmac} from 'node:crypto';
-          const report=JSON.parse(readFileSync('report.json','utf8'));
-          const body=JSON.stringify({operation:'publish_report',timestamp:Date.now(),report});
-          const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(body).digest('base64');
-          const r=await fetch('https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body,signal:AbortSignal.timeout(30000)});
-          const result=await r.text();
-          console.log('Report update HTTP:',r.status);
-          console.log('Report update result:',result.slice(0,1000));
-          if(r.status!==200)throw new Error('Report update failed');
+          const auth=await fetch('https://api.line.me/v2/oauth/accessToken',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'client_credentials',client_id:process.env.LINE_CHANNEL_ID,client_secret:process.env.LINE_CHANNEL_SECRET}),signal:AbortSignal.timeout(10000)});
+          if(!auth.ok)throw new Error('LINE auth failed');const {access_token}=await auth.json();
+          for(const query of ['掃描','南亞科 南亞','2408 1303','1240']){
+            const body=JSON.stringify({operation:'preview_query',timestamp:Date.now(),query});
+            const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(body).digest('base64');
+            const started=Date.now();
+            const r=await fetch('https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body,signal:AbortSignal.timeout(10000)});
+            if(!r.ok)throw new Error('Preview HTTP '+r.status);const data=await r.json();
+            console.log('QUERY',query,'MS',Date.now()-started,'DATES',data.dataDates);
+            console.log(data.text);
+            if(query==='掃描'&&!data.text.includes('/100'))throw new Error('Default 100 scope regression');
+            if(query.includes('南亞')&&(!data.text.includes('2408 南亞科')||!data.text.includes('1303 南亞')))throw new Error('Selected query regression');
+            const texts=[];let chunk='';for(const line of data.text.split('\n')){if((chunk+'\n'+line).length>4800){texts.push(chunk);chunk='';}chunk+=(chunk?'\n':'')+line;}if(chunk)texts.push(chunk);
+            const valid=await fetch('https://api.line.me/v2/bot/message/validate/reply',{method:'POST',headers:{Authorization:'Bearer '+access_token,'Content-Type':'application/json'},body:JSON.stringify({messages:texts.map(text=>({type:'text',text}))}),signal:AbortSignal.timeout(10000)});
+            console.log('LINE validation HTTP',valid.status);if(!valid.ok)throw new Error('LINE format rejected');
+          }
           JS
