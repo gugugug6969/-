@@ -3,6 +3,7 @@ import json
 import hmac
 import hashlib
 import base64
+import subprocess
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
@@ -303,10 +304,17 @@ if __name__ == "__main__":
                   "rateLimited": rate_limited, "generatedAt": int(datetime.now(timezone.utc).timestamp() * 1000)}
         report["results"].sort(key=lambda row: (row["signal"] != "BUY", -(row["rrr"] or 0)))
         raw = json.dumps({"operation": "publish_report", "scope": "default100", "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000), "report": report}, ensure_ascii=False).encode("utf-8")
-        signature = base64.b64encode(hmac.new(LINE_CHANNEL_SECRET.encode(), raw, hashlib.sha256).digest()).decode()
-        response = requests.post("https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports", data=raw, headers={"Content-Type": "application/json", "x-line-signature": signature}, timeout=20)
-        print("Default 100 cache HTTP:", response.status_code, "coverage:", len(quotes), "dates:", report["dataDates"], flush=True)
-        response.raise_for_status()
+        node_script = """
+import {readFileSync} from 'node:fs';
+import {createHmac} from 'node:crypto';
+const body=readFileSync(0);
+const signature=createHmac('sha256',process.env.LINE_CHANNEL_SECRET).update(body).digest('base64');
+const response=await fetch('https://quant-lab-line-reply.nuttybirch8.chatgpt.site/api/line/reports',{method:'POST',headers:{'Content-Type':'application/json','x-line-signature':signature},body,signal:AbortSignal.timeout(20000)});
+console.log('Default 100 cache HTTP:',response.status);
+if(!response.ok)throw new Error('Default report publication failed');
+"""
+        subprocess.run(["node", "--input-type=module", "-e", node_script], input=raw, check=True, timeout=25)
+        print("Default 100 cache coverage:", len(quotes), "dates:", report["dataDates"], flush=True)
 
     def fetch_stock(item):
         code, name = item["code"], item["name"]
